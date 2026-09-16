@@ -1,0 +1,31 @@
+[Unit]
+Description=GitHub Actions Runner
+Requires=podman.socket
+After=podman.socket network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/github-actions-runner:latest
+Pull=never
+ContainerName=github-actions-runner
+SecurityLabelDisable=true
+Volume=%h/.local/share/github-actions-runner/state:/runner
+Volume=%h/.local/share/github-actions-runner/state:%h/.local/share/github-actions-runner/state
+Volume=%t/podman/podman.sock:/run/podman/podman.sock
+Environment=DOCKER_HOST=unix:///run/podman/podman.sock
+Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
+Environment=ACTIONS_RUNNER_CONTAINER_HOOKS=/opt/runner-hooks/index.js
+Environment=ACTIONS_RUNNER_REQUIRE_JOB_CONTAINER=true
+
+[Service]
+Slice=github-actions.slice
+Delegate=yes
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+OOMScoreAdjust=500
+Restart=always
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target

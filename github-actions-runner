@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${0##*/}" == docker ]]; then
+    exec /usr/bin/podman --remote "$@"
+fi
+
+IMAGE="localhost/github-actions-runner:latest"
+DATA_DIR="${HOME}/.local/share/github-actions-runner"
+IMAGE_DIR="${DATA_DIR}/image"
+STATE_DIR="${DATA_DIR}/state"
+SERVICE="github-actions-runner.service"
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} COMMAND
+
+Commands:
+  configure       Register the runner if it is not already registered.
+  status          Show the runner service status.
+  logs            Follow the runner service journal.
+  update-hooks    Rebuild with the latest official container hooks.
+  unregister      Remove the runner registration from GitHub.
+EOF
+}
+
+container_initialise() {
+    if [[ ! -x /runner/run.sh ]]; then
+        cp -a /opt/actions-runner/. /runner/
+    fi
+}
+
+container_run() {
+    container_initialise
+    cd /runner
+    exec /runner/run.sh
+}
+
+container_configure() {
+    local token
+    container_initialise
+    IFS= read -r token
+    [[ -n "$token" ]] || { printf 'Registration token cannot be empty.\n' >&2; return 1; }
+    cd /runner
+    /runner/config.sh --unattended \
+        --url "${RUNNER_URL:?RUNNER_URL is required}" \
+        --token "$token" \
+        --name "${RUNNER_NAME:-$(hostname)}" \
+        --work "${RUNNER_HOST_STATE:?RUNNER_HOST_STATE is required}/_work"
+    unset token
+}
+
+container_unregister() {
+    local token
+    container_initialise
+    IFS= read -r token
+    [[ -n "$token" ]] || { printf 'Removal token cannot be empty.\n' >&2; return 1; }
+    cd /runner
+    /runner/config.sh remove --unattended --token "$token"
+    unset token
+}
+
+configure() {
+    local url token
+    local -a podman_args
+    mkdir -p "$STATE_DIR"
+    if [[ -f "${STATE_DIR}/.runner" ]]; then
+        printf 'Runner is already registered.\n'
+        return
+    fi
+
+    read -r -p 'GitHub repository or organization URL: ' url
+    [[ "$url" == https://github.com/* || "$url" == https://github.com ]] || {
+        printf 'URL must use https://github.com.\n' >&2
+        return 1
+    }
+    read -r -s -p 'GitHub runner registration token: ' token
+    printf '\n'
+    [[ -n "$token" ]] || { printf 'Registration token cannot be empty.\n' >&2; return 1; }
+
+    podman_args=(
+        --rm --interactive
+        --security-opt label=disable
+        --volume "${STATE_DIR}:/runner"
+        --volume "${STATE_DIR}:${STATE_DIR}"
+        --env "RUNNER_URL=${url}"
+        --env "RUNNER_NAME=$(hostname)"
+        --env "RUNNER_HOST_STATE=${STATE_DIR}"
+    )
+    printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-configure
+    unset token
+}
+
+status() {
+    systemctl --user status "$SERVICE"
+}
+
+logs() {
+    journalctl --user --unit "$SERVICE" --follow
+}
+
+update_hooks() {
+    local release hooks_version hooks_sha
+    [[ -f "${IMAGE_DIR}/Containerfile" && -f "${IMAGE_DIR}/github-actions-runner" ]] || {
+        printf 'Image sources are missing; run make install from the repository first.\n' >&2
+        return 1
+    }
+
+    release=$(curl --fail --location --silent --show-error \
+        https://api.github.com/repos/actions/runner-container-hooks/releases/latest)
+    read -r hooks_version hooks_sha < <(python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+asset = next(a for a in r["assets"] if a["name"].startswith("actions-runner-hooks-docker-"))
+print(r["tag_name"].removeprefix("v"), asset["digest"].removeprefix("sha256:"))
+' <<<"$release")
+
+    podman build --tag "$IMAGE" \
+        --build-arg "HOOKS_VERSION=${hooks_version}" \
+        --build-arg "HOOKS_SHA256=${hooks_sha}" \
+        "$IMAGE_DIR"
+    systemctl --user restart "$SERVICE"
+}
+
+unregister() {
+    local token
+    local -a podman_args
+    if [[ ! -f "${STATE_DIR}/.runner" ]]; then
+        printf 'Runner is not registered.\n'
+        return
+    fi
+
+    systemctl --user stop "$SERVICE" 2>/dev/null || true
+    read -r -s -p 'GitHub runner removal token: ' token
+    printf '\n'
+    [[ -n "$token" ]] || { printf 'Removal token cannot be empty.\n' >&2; return 1; }
+    podman_args=(
+        --rm --interactive
+        --security-opt label=disable
+        --volume "${STATE_DIR}:/runner"
+        --volume "${STATE_DIR}:${STATE_DIR}"
+    )
+    printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-unregister
+    unset token
+}
+
+main() {
+    local command="${1:-}"
+    [[ $# -le 1 ]] || { usage >&2; return 1; }
+    case "$command" in
+        configure) configure ;;
+        status) status ;;
+        logs) logs ;;
+        update-hooks) update_hooks ;;
+        unregister) unregister ;;
+        container-run) container_run ;;
+        container-configure) container_configure ;;
+        container-unregister) container_unregister ;;
+        -h|--help) usage ;;
+        *)
+            [[ -n "$command" ]] && printf 'Unknown command: %s\n' "$command" >&2
+            usage >&2
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
