@@ -8,6 +8,8 @@ Wants=network-online.target
 Image=github-actions-runner.build
 ContainerName=github-actions-runner-%i
 SecurityLabelDisable=true
+AddDevice=-/dev/kvm
+GroupAdd=keep-groups
 Volume=%h/.local/share/github-actions-runner/state-%i:/runner
 Volume=%h/.local/share/github-actions-runner/state-%i:%h/.local/share/github-actions-runner/state-%i
 Volume=%t/podman/podman.sock:/run/podman/podman.sock
@@ -15,6 +17,7 @@ Environment=DOCKER_HOST=unix:///run/podman/podman.sock
 Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
 Environment=ACTIONS_RUNNER_CONTAINER_HOOKS=/opt/runner-hooks/index.js
 Environment=ACTIONS_RUNNER_REQUIRE_JOB_CONTAINER=true
+Environment=RUNNER_KVM_DEVICE=/dev/kvm
 
 [Service]
 Slice=github-actions.slice
