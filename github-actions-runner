@@ -61,8 +61,12 @@ IMAGE="localhost/github-actions-runner:latest"
 DATA_DIR="${HOME}/.local/share/github-actions-runner"
 IMAGE_DIR="${DATA_DIR}/image"
 STATE_DIR="${DATA_DIR}/state"
-SERVICE="github-actions-runner.service"
 BUILD_SERVICE="github-actions-runner-build.service"
+RUNNER_COUNT=4
+SERVICES=()
+for ((instance = 1; instance <= RUNNER_COUNT; instance++)); do
+    SERVICES+=("github-actions-runner@${instance}.service")
+done
 
 usage() {
     cat <<EOF
@@ -98,7 +102,7 @@ container_configure() {
     /runner/config.sh --unattended \
         --url "${RUNNER_URL:?RUNNER_URL is required}" \
         --token "$token" \
-        --name "${RUNNER_NAME:-$(hostname)}" \
+        --name "${RUNNER_NAME:-$(hostname)-${RUNNER_INSTANCE:?RUNNER_INSTANCE is required}}" \
         --work "${RUNNER_HOST_STATE:?RUNNER_HOST_STATE is required}/_work"
     unset token
 }
@@ -114,11 +118,17 @@ container_unregister() {
 }
 
 configure() {
-    local url token
+    local instance state_dir url token
+    local -a missing=()
     local -a podman_args
-    mkdir -p "$STATE_DIR"
-    if [[ -f "${STATE_DIR}/.runner" ]]; then
-        printf 'Runner is already registered.\n'
+
+    for ((instance = 1; instance <= RUNNER_COUNT; instance++)); do
+        state_dir="${STATE_DIR}-${instance}"
+        mkdir -p "$state_dir"
+        [[ -f "${state_dir}/.runner" ]] || missing+=("$instance")
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        printf 'All %d runners are already registered.\n' "$RUNNER_COUNT"
         return
     fi
 
@@ -131,25 +141,35 @@ configure() {
     printf '\n'
     [[ -n "$token" ]] || { printf 'Registration token cannot be empty.\n' >&2; return 1; }
 
-    podman_args=(
-        --rm --interactive
-        --security-opt label=disable
-        --volume "${STATE_DIR}:/runner"
-        --volume "${STATE_DIR}:${STATE_DIR}"
-        --env "RUNNER_URL=${url}"
-        --env "RUNNER_NAME=$(hostname)"
-        --env "RUNNER_HOST_STATE=${STATE_DIR}"
-    )
-    printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-configure
+    for instance in "${missing[@]}"; do
+        state_dir="${STATE_DIR}-${instance}"
+        podman_args=(
+            --rm --interactive
+            --security-opt label=disable
+            --volume "${state_dir}:/runner"
+            --volume "${state_dir}:${state_dir}"
+            --env "RUNNER_URL=${url}"
+            --env "RUNNER_NAME=$(hostname)-${instance}"
+            --env "RUNNER_INSTANCE=${instance}"
+            --env "RUNNER_HOST_STATE=${state_dir}"
+        )
+        printf 'Registering runner %d of %d.\n' "$instance" "$RUNNER_COUNT"
+        printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-configure
+    done
     unset token
 }
 
 status() {
-    systemctl --user status "$SERVICE"
+    systemctl --user status "${SERVICES[@]}"
 }
 
 logs() {
-    journalctl --user --unit "$SERVICE" --follow
+    local service
+    local -a journal_args=()
+    for service in "${SERVICES[@]}"; do
+        journal_args+=(--unit "$service")
+    done
+    journalctl --user "${journal_args[@]}" --follow
 }
 
 update_hooks() {
@@ -182,28 +202,37 @@ if version_count != 1 or sha_count != 1:
 path.write_text(text)
 PY
     systemctl --user restart "$BUILD_SERVICE"
-    systemctl --user restart "$SERVICE"
+    systemctl --user restart "${SERVICES[@]}"
 }
 
 unregister() {
-    local token
+    local instance state_dir token
+    local -a registered=()
     local -a podman_args
-    if [[ ! -f "${STATE_DIR}/.runner" ]]; then
-        printf 'Runner is not registered.\n'
+
+    for ((instance = 1; instance <= RUNNER_COUNT; instance++)); do
+        [[ -f "${STATE_DIR}-${instance}/.runner" ]] && registered+=("$instance")
+    done
+    if [[ ${#registered[@]} -eq 0 ]]; then
+        printf 'No runners are registered.\n'
         return
     fi
 
-    systemctl --user stop "$SERVICE" 2>/dev/null || true
+    systemctl --user stop "${SERVICES[@]}" 2>/dev/null || true
     read -r -s -p 'GitHub runner removal token: ' token
     printf '\n'
     [[ -n "$token" ]] || { printf 'Removal token cannot be empty.\n' >&2; return 1; }
-    podman_args=(
-        --rm --interactive
-        --security-opt label=disable
-        --volume "${STATE_DIR}:/runner"
-        --volume "${STATE_DIR}:${STATE_DIR}"
-    )
-    printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-unregister
+    for instance in "${registered[@]}"; do
+        state_dir="${STATE_DIR}-${instance}"
+        podman_args=(
+            --rm --interactive
+            --security-opt label=disable
+            --volume "${state_dir}:/runner"
+            --volume "${state_dir}:${state_dir}"
+        )
+        printf 'Unregistering runner %d of %d.\n' "$instance" "$RUNNER_COUNT"
+        printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-unregister
+    done
     unset token
 }
 
