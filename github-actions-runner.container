@@ -5,8 +5,7 @@ After=podman.socket network-online.target
 Wants=network-online.target
 
 [Container]
-Image=localhost/github-actions-runner:latest
-Pull=never
+Image=github-actions-runner.build
 ContainerName=github-actions-runner
 SecurityLabelDisable=true
 Volume=%h/.local/share/github-actions-runner/state:/runner

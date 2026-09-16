@@ -1,0 +1,10 @@
+[Unit]
+Description=Build the GitHub Actions runner image
+
+[Build]
+ImageTag=localhost/github-actions-runner:latest
+File=%h/.local/share/github-actions-runner/image/Containerfile
+SetWorkingDirectory=%h/.local/share/github-actions-runner/image
+
+[Service]
+RemainAfterExit=yes

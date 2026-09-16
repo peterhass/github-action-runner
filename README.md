@@ -11,6 +11,8 @@ sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip pytho
 sudo loginctl enable-linger "$USER"
 ```
 
+Podman 5.4.2 or newer is required for the build Quadlet.
+
 The account also needs subordinate UID and GID ranges in `/etc/subuid` and `/etc/subgid`; the distribution normally creates these when `uidmap` and Podman are installed.
 
 ## Install
@@ -23,7 +25,7 @@ cd github-actions-runner
 make install
 ```
 
-`make install` builds the local image, installs the Quadlet and user units, enables the rootless `podman.socket`, prompts for the GitHub URL and token, and starts the runner. The token is read without terminal echo, passed to the configuration process over standard input, and is never printed or stored.
+`make install` installs the build and container Quadlets plus the user units, enables the rootless `podman.socket`, builds the local image through `github-actions-runner-build.service`, prompts for the GitHub URL and token, and starts the runner. The token is read without terminal echo, passed to the configuration process over standard input, and is never printed or stored.
 
 Installation is idempotent. The registration lives in `~/.local/share/github-actions-runner/state`; if its `.runner` file exists, another `make install` does not register a second runner.
 
@@ -72,6 +74,7 @@ There is no CPU quota. When the machine is idle, CI may use all CPU cores. Under
 
 - Runner state and workspaces: `~/.local/share/github-actions-runner/state`
 - Installed image sources: `~/.local/share/github-actions-runner/image`
+- Build Quadlet: `~/.config/containers/systemd/github-actions-runner.build`
 - Quadlet: `~/.config/containers/systemd/github-actions-runner.container`
 - Shared slice: `~/.config/systemd/user/github-actions.slice`
 - Podman drop-in: `~/.config/systemd/user/podman.service.d/github-actions.conf`

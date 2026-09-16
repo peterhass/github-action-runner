@@ -13,12 +13,13 @@ install:
 	install -D --mode=0755 ./github-actions-runner $(IMAGE_DIR)/github-actions-runner
 	install -D --mode=0644 ./Containerfile $(IMAGE_DIR)/Containerfile
 	mkdir -p $(STATE_DIR)
-	podman build --tag $(IMAGE) $(IMAGE_DIR)
+	install -D --mode=0644 ./github-actions-runner.build $(QUADLET_DIR)/github-actions-runner.build
 	install -D --mode=0644 ./github-actions-runner.container $(QUADLET_DIR)/github-actions-runner.container
 	install -D --mode=0644 ./github-actions.slice $(SYSTEMD_DIR)/github-actions.slice
 	install -D --mode=0644 ./podman.service.d/github-actions.conf $(SYSTEMD_DIR)/podman.service.d/github-actions.conf
 	systemctl --user daemon-reload
 	systemctl --user enable --now podman.socket
+	systemctl --user restart github-actions-runner-build.service
 	$(BIN_DIR)/github-actions-runner configure
 	systemctl --user enable --now github-actions-runner.service
 
@@ -40,6 +41,8 @@ update-hooks:
 uninstall:
 	$(BIN_DIR)/github-actions-runner unregister
 	-systemctl --user disable --now github-actions-runner.service
+	-systemctl --user stop github-actions-runner-build.service
+	rm -f $(QUADLET_DIR)/github-actions-runner.build
 	rm -f $(QUADLET_DIR)/github-actions-runner.container
 	rm -f $(SYSTEMD_DIR)/github-actions.slice
 	rm -f $(SYSTEMD_DIR)/podman.service.d/github-actions.conf

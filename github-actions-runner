@@ -10,6 +10,7 @@ DATA_DIR="${HOME}/.local/share/github-actions-runner"
 IMAGE_DIR="${DATA_DIR}/image"
 STATE_DIR="${DATA_DIR}/state"
 SERVICE="github-actions-runner.service"
+BUILD_SERVICE="github-actions-runner-build.service"
 
 usage() {
     cat <<EOF
@@ -115,10 +116,20 @@ asset = next(a for a in r["assets"] if a["name"].startswith("actions-runner-hook
 print(r["tag_name"].removeprefix("v"), asset["digest"].removeprefix("sha256:"))
 ' <<<"$release")
 
-    podman build --tag "$IMAGE" \
-        --build-arg "HOOKS_VERSION=${hooks_version}" \
-        --build-arg "HOOKS_SHA256=${hooks_sha}" \
-        "$IMAGE_DIR"
+    python3 - "${IMAGE_DIR}/Containerfile" "$hooks_version" "$hooks_sha" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text, version_count = re.subn(r"^ARG HOOKS_VERSION=.*$", f"ARG HOOKS_VERSION={sys.argv[2]}", text, flags=re.M)
+text, sha_count = re.subn(r"^ARG HOOKS_SHA256=.*$", f"ARG HOOKS_SHA256={sys.argv[3]}", text, flags=re.M)
+if version_count != 1 or sha_count != 1:
+    raise SystemExit("Could not update hook build arguments")
+path.write_text(text)
+PY
+    systemctl --user restart "$BUILD_SERVICE"
     systemctl --user restart "$SERVICE"
 }
 
