@@ -1,0 +1,27 @@
+# Rootless K3s user service, based on the upstream k3s-rootless.service.
+[Unit]
+Description=k3s (Rootless GitHub Actions cluster)
+
+[Service]
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/k3s server --rootless --snapshotter=fuse-overlayfs --disable=traefik --disable=servicelb --disable=metrics-server
+ExecReload=/bin/kill -s HUP $MAINPID
+TimeoutSec=0
+RestartSec=2
+Restart=always
+StartLimitBurst=3
+StartLimitIntervalSec=60
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+Delegate=yes
+Type=simple
+KillMode=mixed
+# CI may use every idle CPU, but loses CPU and I/O contention to normal work.
+CPUWeight=10
+IOWeight=10
+Nice=10
+
+[Install]
+WantedBy=default.target

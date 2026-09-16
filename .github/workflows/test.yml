@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   smoke:
     name: ${{ matrix.name }}
@@ -14,10 +17,10 @@ jobs:
         include:
           - name: Debian stable
             image: debian:stable
-            install: apt-get update && apt-get install --yes bash ca-certificates coreutils git make shellcheck util-linux
+            install: apt-get update && apt-get install --yes bash coreutils grep make shellcheck
           - name: Arch Linux
             image: archlinux:latest
-            install: pacman -Syu --noconfirm --needed bash ca-certificates coreutils git make shellcheck util-linux
+            install: pacman -Syu --noconfirm --needed bash coreutils grep make shellcheck
     container:
       image: ${{ matrix.image }}
     steps:
@@ -25,4 +28,4 @@ jobs:
         run: ${{ matrix.install }}
       - uses: actions/checkout@v4
       - name: Run smoke tests
-        run: ./tests/smoke.sh
+        run: make test

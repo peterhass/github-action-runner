@@ -1,94 +1,125 @@
 # GitHub Actions Runner
 
-A small, rootless Podman Quadlet for running concurrent GitHub Actions jobs as the current user on an AMD64 Linux system. It creates one runner per physical CPU core, packages the official GitHub Actions runner and GitHub's official Docker container-hooks bundle, and uses the rootless Podman API instead of Docker or nested Podman.
+A small, rootless K3s + GitHub Actions Runner Controller (ARC) setup for an AMD64 Linux workstation. ARC keeps **zero runners while idle** and starts up to six ephemeral runners when GitHub queues work. Every runner can access `/dev/kvm`.
+
+K3s itself runs as the current user through `systemd --user`; root inside runner pods maps into the rootless K3s user namespace, not host root. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
 
 ## Prerequisites
 
-Install the system-wide packages and enable lingering once. These are the only commands that require administrator access.
+This repository targets current Arch Linux first. Install the host dependencies and enable lingering once:
 
-Debian stable (currently Debian 13):
-
-```bash
-sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip python3 util-linux git make dbus-user-session
+```sh
+sudo pacman -S --needed curl fuse-overlayfs helm
 sudo loginctl enable-linger "$USER"
 ```
 
-Arch Linux:
+Install the K3s binary without installing its rootful system service:
 
-```bash
-sudo pacman -S --needed podman passt slirp4netns fuse-overlayfs curl unzip python util-linux git make
-sudo loginctl enable-linger "$USER"
+```sh
+curl -fL -o /tmp/k3s https://github.com/k3s-io/k3s/releases/latest/download/k3s
+sudo install -m 0755 /tmp/k3s /usr/local/bin/k3s
+rm /tmp/k3s
 ```
 
-Podman 5.4.2 or newer is required for the build Quadlet.
+Rootless K3s requires pure cgroup v2 and delegated cgroups. Modern systemd systems normally provide this; verify with `stat -fc %T /sys/fs/cgroup` (expected: `cgroup2fs`). The supplied user unit has `Delegate=yes`.
 
-The account also needs subordinate UID and GID ranges in `/etc/subuid` and `/etc/subgid`; the distribution normally creates these when `uidmap` and Podman are installed.
+For KVM, make sure the current user can open the device:
+
+```sh
+ls -l /dev/kvm
+test -r /dev/kvm && test -w /dev/kvm
+```
+
+On Arch this normally means membership in the `kvm` group. Log out and back in after changing group membership.
 
 ## Install
 
-Create a repository or organization runner in GitHub, then copy its short-lived registration token. Install as the user who will run CI:
-
-```bash
+```sh
 git clone <repo-url>
-cd github-actions-runner
+cd github-action-runner
 make install
 ```
 
-`make install` detects the number of physical CPU cores with `lscpu`, installs the build and templated container Quadlets plus one runner instance per core, enables the rootless `podman.socket`, builds the local image through `github-actions-runner-build.service`, prompts once for the GitHub URL and token, registers the runners, and starts them. Quadlet applies each instance's `[Install]` section during `daemon-reload`, because generated services cannot be enabled directly with `systemctl enable`. The token is read without terminal echo, passed to each configuration process over standard input, and is never printed or stored.
+`make install` installs and starts the rootless K3s user service, waits for Kubernetes, installs the official ARC controller Helm chart, and prompts for:
 
-Installation is idempotent. Registrations live in numbered directories such as `~/.local/share/github-actions-runner/state-1`; another `make install` only registers missing runners. An existing single-runner installation is reused as `state-1` through a compatibility symlink and mount without re-registering it. The detected runner count is stored in `~/.local/share/github-actions-runner/runner-count` so every management command operates on the same set of instances.
+1. the GitHub repository or organization URL;
+2. a GitHub PAT used by ARC.
 
-## Commands
+The PAT is written only to a Kubernetes Secret in the rootless cluster. For a repository runner, use a token with the permissions required by GitHub's ARC documentation. A GitHub App can be substituted later if desired.
 
-```text
-make status        Show the user service status
-make logs          Follow the user service journal
-make restart       Restart the runner
-make disable       Disable and stop the runner
-make update-hooks  Rebuild with the latest official hooks and restart
-make uninstall     Unregister from GitHub and remove all local state
+The ARC charts are pinned to `0.14.2` by the helper script. Override temporarily with `ARC_VERSION=...`.
+
+## Scaling
+
+`arc-runner-values.yaml` configures:
+
+```yaml
+runnerScaleSetName: self-hosted-k3s
+minRunners: 0
+maxRunners: 6
 ```
 
-`make uninstall` asks for a GitHub runner removal token when the runner is registered. It only deletes the persisted state after unregistration succeeds.
+With no queued work, only K3s, the ARC controller, and its listener remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs.
 
-`make disable` stops and masks the generated runner service. A later `make install` unmasks and starts it again without creating another GitHub registration.
-
-The installed `github-actions-runner` command also provides `configure`, `status`, `logs`, `update-hooks`, and `unregister` directly.
-
-## Workflows
-
-Every job sent to this runner must define `container:`. `ACTIONS_RUNNER_REQUIRE_JOB_CONTAINER=true` rejects jobs that do not. For example:
+Use the scale-set name in workflows:
 
 ```yaml
 jobs:
   test:
-    runs-on: self-hosted
-    container: ubuntu:24.04
+    runs-on: self-hosted-k3s
     steps:
       - uses: actions/checkout@v4
       - run: ./test.sh
 ```
 
-The runner uses GitHub's official Docker hooks with a compatibility command that talks to the mounted rootless Podman socket. The command translates runner-container paths to their corresponding host paths and removes the Docker socket mount that the GitHub runner automatically requests for job containers. Job and service containers are therefore created by the current user's host Podman service. There is no Docker daemon, privileged runner container, or nested Podman.
+The runner image is intentionally not configured with Docker-in-Docker. Jobs run directly in the ephemeral runner pod. If a workflow uses `container:` or `services:`, add an ARC container mode appropriate for that workflow.
 
-Never mount the Podman socket directly into workflow job containers. Socket access is equivalent to arbitrary code execution as the host user and is intentionally limited to the runner container.
+## KVM
 
-Use this runner only for trusted repositories and trusted workflows. A workflow can control containers through the runner and can modify the persistent work directory.
+All runner pods bind-mount the host `/dev/kvm`. KVM is shareable, so several runners may launch VMs concurrently. The runner container uses UID 0 *inside the rootless K3s user namespace* so device access maps back to the unprivileged host user that owns the K3s process.
 
-## Resources
+Test the exact rootless KVM path before sending jobs to it:
 
-The generated Quadlet services and socket-activated `podman.service` run in `github-actions.slice`. All runners and their job and service containers consequently share a hard 1 GiB memory limit. On machines with many physical cores, increase `MemoryMax` in `github-actions.slice` if the workloads need more memory.
+```sh
+make kvm-test
+```
 
-There is no CPU quota. When the machine is idle, CI may use all CPU cores. Under CPU or I/O contention, its low CPU and I/O weights, idle I/O scheduling class, and high nice value make it lose strongly to normal workloads.
+This creates a temporary pod with the same `/dev/kvm` hostPath and verifies read/write access.
+
+## Resource policy
+
+There is deliberately **no Kubernetes CPU limit**. Each runner requests only `100m` for scheduling, while `k3s-rootless.service` uses low `CPUWeight`, `IOWeight`, and a high nice value. CI can therefore consume the whole CPU when it is idle but loses contention to ordinary work in the same user manager.
+
+Each runner has a 4 GiB memory limit. Six runners can therefore consume at most 24 GiB in their runner containers, leaving headroom on a 32 GiB workstation. Adjust this in `arc-runner-values.yaml` if VM memory requirements differ.
+
+## Commands
+
+```text
+make status      Show K3s and Kubernetes pod status
+make logs        Follow ARC controller/listener logs
+make restart     Restart rootless K3s
+make disable     Stop and disable rootless K3s
+make configure   Re-run ARC configuration
+make kvm-test    Verify /dev/kvm from a rootless pod
+make uninstall   Remove ARC and local configuration
+make test        Run repository smoke tests
+```
+
+K3s logs are available with:
+
+```sh
+journalctl --user -u k3s-rootless -f
+```
 
 ## Files
 
-- Runner state and workspaces: `~/.local/share/github-actions-runner/state-N`
-- Detected runner count: `~/.local/share/github-actions-runner/runner-count`
-- Installed image sources: `~/.local/share/github-actions-runner/image`
-- Build Quadlet: `~/.config/containers/systemd/github-actions-runner.build`
-- Quadlet template: `~/.config/containers/systemd/github-actions-runner@.container`
-- Shared slice: `~/.config/systemd/user/github-actions.slice`
-- Podman drop-in: `~/.config/systemd/user/podman.service.d/github-actions.conf`
+- Helper command: `~/.local/bin/github-actions-runner`
+- Rootless K3s unit: `~/.config/systemd/user/k3s-rootless.service`
+- Installed ARC values: `~/.local/share/github-actions-runner/`
+- Kubeconfig: `~/.kube/k3s.yaml`
 
-Each state directory is mounted at `/runner` and at its unchanged host path inside its runner. The latter allows the host Podman API to resolve workspace bind mounts requested by the hooks. The rootless socket is mounted at `/run/podman/podman.sock`; it is not exposed to job containers.
+## Security
+
+Use this only for trusted repositories and trusted workflows. Runner jobs receive KVM access and execute as root inside a user namespace whose host identity is the unprivileged K3s user. Rootless K3s reduces the host-root blast radius, but it is not a security boundary against every kernel or KVM vulnerability.
+
+K3s rootless mode is still documented as experimental upstream.
