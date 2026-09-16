@@ -4,10 +4,19 @@ A small, rootless Podman Quadlet for running concurrent GitHub Actions jobs as t
 
 ## Prerequisites
 
-Install the system-wide packages and enable lingering once. These are the only commands that require administrator access:
+Install the system-wide packages and enable lingering once. These are the only commands that require administrator access.
+
+Debian stable (currently Debian 13):
 
 ```bash
-sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip python3 util-linux
+sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip python3 util-linux git make dbus-user-session
+sudo loginctl enable-linger "$USER"
+```
+
+Arch Linux:
+
+```bash
+sudo pacman -S --needed podman passt slirp4netns fuse-overlayfs curl unzip python util-linux git make
 sudo loginctl enable-linger "$USER"
 ```
 
