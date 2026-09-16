@@ -9,20 +9,28 @@ Install the system-wide packages and enable lingering once. These are the only c
 Debian stable (currently Debian 13):
 
 ```bash
-sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip python3 util-linux git make dbus-user-session
+sudo apt install podman crun uidmap passt slirp4netns fuse-overlayfs curl unzip python3 util-linux git make dbus-user-session
 sudo loginctl enable-linger "$USER"
 ```
 
 Arch Linux:
 
 ```bash
-sudo pacman -S --needed podman passt slirp4netns fuse-overlayfs curl unzip python util-linux git make
+sudo pacman -S --needed podman crun passt slirp4netns fuse-overlayfs curl unzip python util-linux git make
 sudo loginctl enable-linger "$USER"
 ```
 
 Podman 5.4.2 or newer is required for the build Quadlet.
 
 The account also needs subordinate UID and GID ranges in `/etc/subuid` and `/etc/subgid`; the distribution normally creates these when `uidmap` and Podman are installed.
+
+For KVM-backed jobs, enable hardware virtualization, make sure `/dev/kvm` exists, and add the runner account to the device's group (normally `kvm`):
+
+```bash
+sudo usermod --append --groups kvm "$USER"
+```
+
+Log out and back in after changing group membership. The runner automatically exposes an accessible `/dev/kvm` to job containers and container actions. Hosts without KVM still work, but jobs that require KVM will not.
 
 ## Install
 
@@ -69,7 +77,7 @@ jobs:
       - run: ./test.sh
 ```
 
-The runner uses GitHub's official Docker hooks with a compatibility command that talks to the mounted rootless Podman socket. The command translates runner-container paths to their corresponding host paths and removes the Docker socket mount that the GitHub runner automatically requests for job containers. Job and service containers are therefore created by the current user's host Podman service. There is no Docker daemon, privileged runner container, or nested Podman.
+The runner uses GitHub's official Docker hooks with a compatibility command that talks to the mounted rootless Podman socket. The command translates runner-container paths to their corresponding host paths, removes the Docker socket mount that the GitHub runner automatically requests for job containers, and passes through an accessible `/dev/kvm` while preserving the runner user's supplementary groups. Job and service containers are therefore created by the current user's host Podman service. There is no Docker daemon, privileged runner container, or nested Podman.
 
 Never mount the Podman socket directly into workflow job containers. Socket access is equivalent to arbitrary code execution as the host user and is intentionally limited to the runner container.
 
@@ -77,7 +85,7 @@ Use this runner only for trusted repositories and trusted workflows. A workflow 
 
 ## Resources
 
-The generated Quadlet services and socket-activated `podman.service` run in `github-actions.slice`. All runners and their job and service containers consequently share a hard 1 GiB memory limit. On machines with many physical cores, increase `MemoryMax` in `github-actions.slice` if the workloads need more memory.
+The generated Quadlet services and socket-activated `podman.service` run in `github-actions.slice`. There is no hard memory limit because all runner instances and their VM-backed jobs share this slice; a single 1 GiB cap prevents NixOS VM tests from starting reliably.
 
 There is no CPU quota. When the machine is idle, CI may use all CPU cores. Under CPU or I/O contention, its low CPU and I/O weights, idle I/O scheduling class, and high nice value make it lose strongly to normal workloads.
 
