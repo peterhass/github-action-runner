@@ -5,20 +5,27 @@ IMAGE_DIR := $(DATA_DIR)/image
 STATE_DIR := $(DATA_DIR)/state
 SYSTEMD_DIR := $(HOME)/.config/systemd/user
 QUADLET_DIR := $(HOME)/.config/containers/systemd
-RUNNER_INSTANCES := 1 2 3 4
+RUNNER_COUNT := $(shell ./github-actions-runner physical-core-count)
+ifeq ($(RUNNER_COUNT),)
+$(error Could not determine the number of physical CPU cores)
+endif
+RUNNER_INSTANCES := $(shell seq 1 $(RUNNER_COUNT))
 RUNNER_SERVICES := $(addprefix github-actions-runner@,$(addsuffix .service,$(RUNNER_INSTANCES)))
 
 .PHONY: install status logs restart disable update-hooks uninstall
 
 install:
 	-systemctl --user stop github-actions-runner.service
+	-systemctl --user stop 'github-actions-runner@*.service'
 	install -D --mode=0755 ./github-actions-runner $(BIN_DIR)/github-actions-runner
 	install -D --mode=0755 ./github-actions-runner $(IMAGE_DIR)/github-actions-runner
 	install -D --mode=0644 ./Containerfile $(IMAGE_DIR)/Containerfile
 	if [ -f $(STATE_DIR)/.runner ] && [ ! -e $(DATA_DIR)/state-1 ]; then ln -s state $(DATA_DIR)/state-1; fi
 	mkdir -p $(addprefix $(DATA_DIR)/state-,$(RUNNER_INSTANCES))
+	printf '%s\n' $(RUNNER_COUNT) > $(DATA_DIR)/runner-count
 	install -D --mode=0644 ./github-actions-runner.build $(QUADLET_DIR)/github-actions-runner.build
 	install -D --mode=0644 ./github-actions-runner@.container $(QUADLET_DIR)/github-actions-runner@.container
+	for unit in $(QUADLET_DIR)/github-actions-runner@[0-9]*.container; do [ ! -L "$$unit" ] || rm -f "$$unit"; done
 	for instance in $(RUNNER_INSTANCES); do ln -sfn github-actions-runner@.container $(QUADLET_DIR)/github-actions-runner@$$instance.container; done
 	if [ -L $(DATA_DIR)/state-1 ]; then install -D --mode=0644 ./github-actions-runner@1.container.d/10-legacy-state.conf $(QUADLET_DIR)/github-actions-runner@1.container.d/10-legacy-state.conf; else rm -f $(QUADLET_DIR)/github-actions-runner@1.container.d/10-legacy-state.conf; fi
 	rm -f $(QUADLET_DIR)/github-actions-runner.container
@@ -55,7 +62,7 @@ uninstall:
 	rm -f $(QUADLET_DIR)/github-actions-runner.build
 	rm -f $(QUADLET_DIR)/github-actions-runner.container
 	rm -f $(QUADLET_DIR)/github-actions-runner@.container
-	rm -f $(addprefix $(QUADLET_DIR)/github-actions-runner@,$(addsuffix .container,$(RUNNER_INSTANCES)))
+	for unit in $(QUADLET_DIR)/github-actions-runner@[0-9]*.container; do [ ! -L "$$unit" ] || rm -f "$$unit"; done
 	rm -rf $(QUADLET_DIR)/github-actions-runner@1.container.d
 	rm -f $(SYSTEMD_DIR)/github-actions.slice
 	rm -f $(SYSTEMD_DIR)/podman.service.d/github-actions.conf

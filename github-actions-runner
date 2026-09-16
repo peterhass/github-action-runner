@@ -61,12 +61,8 @@ IMAGE="localhost/github-actions-runner:latest"
 DATA_DIR="${HOME}/.local/share/github-actions-runner"
 IMAGE_DIR="${DATA_DIR}/image"
 STATE_DIR="${DATA_DIR}/state"
+COUNT_FILE="${DATA_DIR}/runner-count"
 BUILD_SERVICE="github-actions-runner-build.service"
-RUNNER_COUNT=4
-SERVICES=()
-for ((instance = 1; instance <= RUNNER_COUNT; instance++)); do
-    SERVICES+=("github-actions-runner@${instance}.service")
-done
 
 usage() {
     cat <<EOF
@@ -78,7 +74,49 @@ Commands:
   logs            Follow the runner service journal.
   update-hooks    Rebuild with the latest official container hooks.
   unregister      Remove the runner registration from GitHub.
+  physical-core-count
+                  Show the number of physical CPU cores.
 EOF
+}
+
+physical_core_count() {
+    local count
+    command -v lscpu >/dev/null 2>&1 || {
+        printf 'lscpu is required to detect physical CPU cores.\n' >&2
+        return 1
+    }
+    count=$(LC_ALL=C lscpu --parse=CORE,SOCKET \
+        | awk -F, '!/^#/ { print $1 "," $2 }' \
+        | sort --unique \
+        | wc --lines)
+    [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'Could not determine the number of physical CPU cores.\n' >&2
+        return 1
+    }
+    printf '%d\n' "$count"
+}
+
+runner_count() {
+    local count
+    if [[ -f "$COUNT_FILE" ]]; then
+        IFS= read -r count < "$COUNT_FILE"
+    else
+        count=$(physical_core_count)
+    fi
+    [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'Invalid runner count: %s\n' "$count" >&2
+        return 1
+    }
+    printf '%d\n' "$count"
+}
+
+runner_services() {
+    local count instance
+    count=$(runner_count)
+    SERVICES=()
+    for ((instance = 1; instance <= count; instance++)); do
+        SERVICES+=("github-actions-runner@${instance}.service")
+    done
 }
 
 container_initialise() {
@@ -118,17 +156,18 @@ container_unregister() {
 }
 
 configure() {
-    local instance state_dir url token
+    local count instance state_dir url token
     local -a missing=()
     local -a podman_args
 
-    for ((instance = 1; instance <= RUNNER_COUNT; instance++)); do
+    count=$(runner_count)
+    for ((instance = 1; instance <= count; instance++)); do
         state_dir="${STATE_DIR}-${instance}"
         mkdir -p "$state_dir"
         [[ -f "${state_dir}/.runner" ]] || missing+=("$instance")
     done
     if [[ ${#missing[@]} -eq 0 ]]; then
-        printf 'All %d runners are already registered.\n' "$RUNNER_COUNT"
+        printf 'All %d runners are already registered.\n' "$count"
         return
     fi
 
@@ -153,19 +192,21 @@ configure() {
             --env "RUNNER_INSTANCE=${instance}"
             --env "RUNNER_HOST_STATE=${state_dir}"
         )
-        printf 'Registering runner %d of %d.\n' "$instance" "$RUNNER_COUNT"
+        printf 'Registering runner %d of %d.\n' "$instance" "$count"
         printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-configure
     done
     unset token
 }
 
 status() {
+    runner_services
     systemctl --user status "${SERVICES[@]}"
 }
 
 logs() {
     local service
     local -a journal_args=()
+    runner_services
     for service in "${SERVICES[@]}"; do
         journal_args+=(--unit "$service")
     done
@@ -202,6 +243,7 @@ if version_count != 1 or sha_count != 1:
 path.write_text(text)
 PY
     systemctl --user restart "$BUILD_SERVICE"
+    runner_services
     systemctl --user restart "${SERVICES[@]}"
 }
 
@@ -209,16 +251,21 @@ unregister() {
     local instance state_dir token
     local -a registered=()
     local -a podman_args
+    local -a services=()
 
-    for ((instance = 1; instance <= RUNNER_COUNT; instance++)); do
-        [[ -f "${STATE_DIR}-${instance}/.runner" ]] && registered+=("$instance")
+    for state_dir in "${STATE_DIR}-"*; do
+        [[ -f "${state_dir}/.runner" ]] || continue
+        instance="${state_dir#"${STATE_DIR}-"}"
+        [[ "$instance" =~ ^[1-9][0-9]*$ ]] || continue
+        registered+=("$instance")
+        services+=("github-actions-runner@${instance}.service")
     done
     if [[ ${#registered[@]} -eq 0 ]]; then
         printf 'No runners are registered.\n'
         return
     fi
 
-    systemctl --user stop "${SERVICES[@]}" 2>/dev/null || true
+    systemctl --user stop "${services[@]}" 2>/dev/null || true
     read -r -s -p 'GitHub runner removal token: ' token
     printf '\n'
     [[ -n "$token" ]] || { printf 'Removal token cannot be empty.\n' >&2; return 1; }
@@ -230,7 +277,7 @@ unregister() {
             --volume "${state_dir}:/runner"
             --volume "${state_dir}:${state_dir}"
         )
-        printf 'Unregistering runner %d of %d.\n' "$instance" "$RUNNER_COUNT"
+        printf 'Unregistering runner %d.\n' "$instance"
         printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-unregister
     done
     unset token
@@ -245,6 +292,7 @@ main() {
         logs) logs ;;
         update-hooks) update_hooks ;;
         unregister) unregister ;;
+        physical-core-count) physical_core_count ;;
         container-run) container_run ;;
         container-configure) container_configure ;;
         container-unregister) container_unregister ;;
