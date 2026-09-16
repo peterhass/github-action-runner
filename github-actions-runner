@@ -1,8 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+docker_wrapper() {
+    local option runner_host_state="" source target volume
+    local -a args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--volume)
+                [[ $# -ge 2 ]] || { printf '%s requires an argument.\n' "$1" >&2; return 2; }
+                option="$1"
+                volume="$2"
+                shift 2
+                ;;
+            -v=*|--volume=*)
+                option="${1%%=*}="
+                volume="${1#*=}"
+                shift
+                ;;
+            *)
+                args+=("$1")
+                shift
+                continue
+                ;;
+        esac
+
+        source="${volume%%:*}"
+        target="${volume#*:}"
+        target="${target%%:*}"
+        if [[ "$target" == /__w && "$source" == */_work ]]; then
+            runner_host_state="${source%/_work}"
+        fi
+        # The runner adds docker.sock automatically; reject any host API socket source.
+        case "$source" in
+            /run/docker.sock|/var/run/docker.sock|*/podman/podman.sock) continue ;;
+        esac
+        if [[ "$volume" == /runner:* || "$volume" == /runner/*:* ]]; then
+            [[ -n "$runner_host_state" ]] || {
+                printf 'Cannot translate runner mount without the /__w workspace mount.\n' >&2
+                return 2
+            }
+            volume="${runner_host_state}${volume#/runner}"
+        fi
+
+        if [[ "$option" == *= ]]; then
+            args+=("${option}${volume}")
+        else
+            args+=("$option" "$volume")
+        fi
+    done
+
+    exec /usr/bin/podman --remote "${args[@]}"
+}
+
 if [[ "${0##*/}" == docker ]]; then
-    exec /usr/bin/podman --remote "$@"
+    docker_wrapper "$@"
 fi
 
 IMAGE="localhost/github-actions-runner:latest"

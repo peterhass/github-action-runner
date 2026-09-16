@@ -60,7 +60,7 @@ jobs:
       - run: ./test.sh
 ```
 
-The runner uses GitHub's official Docker hooks with a compatibility command that talks to the mounted rootless Podman socket. Job and service containers are therefore created by the current user's host Podman service. There is no Docker daemon, privileged runner container, or nested Podman.
+The runner uses GitHub's official Docker hooks with a compatibility command that talks to the mounted rootless Podman socket. The command translates runner-container paths to their corresponding host paths and removes the Docker socket mount that the GitHub runner automatically requests for job containers. Job and service containers are therefore created by the current user's host Podman service. There is no Docker daemon, privileged runner container, or nested Podman.
 
 Never mount the Podman socket directly into workflow job containers. Socket access is equivalent to arbitrary code execution as the host user and is intentionally limited to the runner container.
 
