@@ -14,10 +14,10 @@ jobs:
         include:
           - name: Debian stable
             image: debian:stable
-            install: apt-get update && apt-get install --yes bash ca-certificates coreutils git make shellcheck util-linux
+            install: apt-get update && apt-get install --yes bash ca-certificates coreutils crun git make podman shellcheck util-linux
           - name: Arch Linux
             image: archlinux:latest
-            install: pacman -Syu --noconfirm --needed bash ca-certificates coreutils git make shellcheck util-linux
+            install: pacman -Syu --noconfirm --needed bash ca-certificates coreutils crun git make podman shellcheck util-linux
     container:
       image: ${{ matrix.image }}
     steps:
