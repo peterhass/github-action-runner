@@ -17,11 +17,12 @@ install:
 	install -D --mode=0644 ./github-actions-runner.container $(QUADLET_DIR)/github-actions-runner.container
 	install -D --mode=0644 ./github-actions.slice $(SYSTEMD_DIR)/github-actions.slice
 	install -D --mode=0644 ./podman.service.d/github-actions.conf $(SYSTEMD_DIR)/podman.service.d/github-actions.conf
+	systemctl --user unmask github-actions-runner.service
 	systemctl --user daemon-reload
 	systemctl --user enable --now podman.socket
 	systemctl --user restart github-actions-runner-build.service
 	$(BIN_DIR)/github-actions-runner configure
-	systemctl --user enable --now github-actions-runner.service
+	systemctl --user start github-actions-runner.service
 
 status:
 	$(BIN_DIR)/github-actions-runner status
@@ -33,14 +34,15 @@ restart:
 	systemctl --user restart github-actions-runner.service
 
 disable:
-	systemctl --user disable --now github-actions-runner.service
+	systemctl --user mask --now github-actions-runner.service
 
 update-hooks:
 	$(BIN_DIR)/github-actions-runner update-hooks
 
 uninstall:
 	$(BIN_DIR)/github-actions-runner unregister
-	-systemctl --user disable --now github-actions-runner.service
+	-systemctl --user stop github-actions-runner.service
+	-systemctl --user unmask github-actions-runner.service
 	-systemctl --user stop github-actions-runner-build.service
 	rm -f $(QUADLET_DIR)/github-actions-runner.build
 	rm -f $(QUADLET_DIR)/github-actions-runner.container

@@ -25,7 +25,7 @@ cd github-actions-runner
 make install
 ```
 
-`make install` installs the build and container Quadlets plus the user units, enables the rootless `podman.socket`, builds the local image through `github-actions-runner-build.service`, prompts for the GitHub URL and token, and starts the runner. The token is read without terminal echo, passed to the configuration process over standard input, and is never printed or stored.
+`make install` installs the build and container Quadlets plus the user units, enables the rootless `podman.socket`, builds the local image through `github-actions-runner-build.service`, prompts for the GitHub URL and token, and starts the runner. Quadlet applies the container's `[Install]` section during `daemon-reload`, because generated services cannot be enabled directly with `systemctl enable`. The token is read without terminal echo, passed to the configuration process over standard input, and is never printed or stored.
 
 Installation is idempotent. The registration lives in `~/.local/share/github-actions-runner/state`; if its `.runner` file exists, another `make install` does not register a second runner.
 
@@ -41,6 +41,8 @@ make uninstall     Unregister from GitHub and remove all local state
 ```
 
 `make uninstall` asks for a GitHub runner removal token when the runner is registered. It only deletes the persisted state after unregistration succeeds.
+
+`make disable` stops and masks the generated runner service. A later `make install` unmasks and starts it again without creating another GitHub registration.
 
 The installed `github-actions-runner` command also provides `configure`, `status`, `logs`, `update-hooks`, and `unregister` directly.
 
