@@ -1,0 +1,28 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian stable
+            image: debian:stable
+            install: apt-get update && apt-get install --yes bash ca-certificates coreutils git make shellcheck util-linux
+          - name: Arch Linux
+            image: archlinux:latest
+            install: pacman -Syu --noconfirm --needed bash ca-certificates coreutils git make shellcheck util-linux
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install test dependencies
+        run: ${{ matrix.install }}
+      - uses: actions/checkout@v4
+      - name: Run smoke tests
+        run: ./tests/smoke.sh

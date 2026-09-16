@@ -1,13 +1,22 @@
 # GitHub Actions Runner
 
-A small, rootless Podman Quadlet for running GitHub Actions jobs as the current user on an AMD64 Linux system. It packages the official GitHub Actions runner and GitHub's official Docker container-hooks bundle, while using the rootless Podman API instead of Docker or nested Podman.
+A small, rootless Podman Quadlet for running concurrent GitHub Actions jobs as the current user on an AMD64 Linux system. It creates one runner per physical CPU core, packages the official GitHub Actions runner and GitHub's official Docker container-hooks bundle, and uses the rootless Podman API instead of Docker or nested Podman.
 
 ## Prerequisites
 
-Install the system-wide packages and enable lingering once. These are the only commands that require administrator access:
+Install the system-wide packages and enable lingering once. These are the only commands that require administrator access.
+
+Debian stable (currently Debian 13):
 
 ```bash
-sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip python3
+sudo apt install podman uidmap passt slirp4netns fuse-overlayfs curl unzip python3 util-linux git make dbus-user-session
+sudo loginctl enable-linger "$USER"
+```
+
+Arch Linux:
+
+```bash
+sudo pacman -S --needed podman passt slirp4netns fuse-overlayfs curl unzip python util-linux git make
 sudo loginctl enable-linger "$USER"
 ```
 
@@ -25,9 +34,9 @@ cd github-actions-runner
 make install
 ```
 
-`make install` installs the build and container Quadlets plus the user units, enables the rootless `podman.socket`, builds the local image through `github-actions-runner-build.service`, prompts for the GitHub URL and token, and starts the runner. Quadlet applies the container's `[Install]` section during `daemon-reload`, because generated services cannot be enabled directly with `systemctl enable`. The token is read without terminal echo, passed to the configuration process over standard input, and is never printed or stored.
+`make install` detects the number of physical CPU cores with `lscpu`, installs the build and templated container Quadlets plus one runner instance per core, enables the rootless `podman.socket`, builds the local image through `github-actions-runner-build.service`, prompts once for the GitHub URL and token, registers the runners, and starts them. Quadlet applies each instance's `[Install]` section during `daemon-reload`, because generated services cannot be enabled directly with `systemctl enable`. The token is read without terminal echo, passed to each configuration process over standard input, and is never printed or stored.
 
-Installation is idempotent. The registration lives in `~/.local/share/github-actions-runner/state`; if its `.runner` file exists, another `make install` does not register a second runner.
+Installation is idempotent. Registrations live in numbered directories such as `~/.local/share/github-actions-runner/state-1`; another `make install` only registers missing runners. An existing single-runner installation is reused as `state-1` through a compatibility symlink and mount without re-registering it. The detected runner count is stored in `~/.local/share/github-actions-runner/runner-count` so every management command operates on the same set of instances.
 
 ## Commands
 
@@ -68,17 +77,18 @@ Use this runner only for trusted repositories and trusted workflows. A workflow 
 
 ## Resources
 
-The generated Quadlet service and socket-activated `podman.service` run in `github-actions.slice`. The runner and all job and service containers consequently share a hard 1 GiB memory limit.
+The generated Quadlet services and socket-activated `podman.service` run in `github-actions.slice`. All runners and their job and service containers consequently share a hard 1 GiB memory limit. On machines with many physical cores, increase `MemoryMax` in `github-actions.slice` if the workloads need more memory.
 
 There is no CPU quota. When the machine is idle, CI may use all CPU cores. Under CPU or I/O contention, its low CPU and I/O weights, idle I/O scheduling class, and high nice value make it lose strongly to normal workloads.
 
 ## Files
 
-- Runner state and workspaces: `~/.local/share/github-actions-runner/state`
+- Runner state and workspaces: `~/.local/share/github-actions-runner/state-N`
+- Detected runner count: `~/.local/share/github-actions-runner/runner-count`
 - Installed image sources: `~/.local/share/github-actions-runner/image`
 - Build Quadlet: `~/.config/containers/systemd/github-actions-runner.build`
-- Quadlet: `~/.config/containers/systemd/github-actions-runner.container`
+- Quadlet template: `~/.config/containers/systemd/github-actions-runner@.container`
 - Shared slice: `~/.config/systemd/user/github-actions.slice`
 - Podman drop-in: `~/.config/systemd/user/podman.service.d/github-actions.conf`
 
-The state directory is mounted at `/runner` and at its unchanged host path inside the runner. The latter allows the host Podman API to resolve workspace bind mounts requested by the hooks. The rootless socket is mounted at `/run/podman/podman.sock`; it is not exposed to job containers.
+Each state directory is mounted at `/runner` and at its unchanged host path inside its runner. The latter allows the host Podman API to resolve workspace bind mounts requested by the hooks. The rootless socket is mounted at `/run/podman/podman.sock`; it is not exposed to job containers.

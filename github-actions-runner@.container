@@ -1,15 +1,15 @@
 [Unit]
-Description=GitHub Actions Runner
+Description=GitHub Actions Runner %i
 Requires=podman.socket
 After=podman.socket network-online.target
 Wants=network-online.target
 
 [Container]
 Image=github-actions-runner.build
-ContainerName=github-actions-runner
+ContainerName=github-actions-runner-%i
 SecurityLabelDisable=true
-Volume=%h/.local/share/github-actions-runner/state:/runner
-Volume=%h/.local/share/github-actions-runner/state:%h/.local/share/github-actions-runner/state
+Volume=%h/.local/share/github-actions-runner/state-%i:/runner
+Volume=%h/.local/share/github-actions-runner/state-%i:%h/.local/share/github-actions-runner/state-%i
 Volume=%t/podman/podman.sock:/run/podman/podman.sock
 Environment=DOCKER_HOST=unix:///run/podman/podman.sock
 Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
