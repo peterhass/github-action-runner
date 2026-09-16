@@ -140,7 +140,7 @@ container_configure() {
     /runner/config.sh --unattended \
         --url "${RUNNER_URL:?RUNNER_URL is required}" \
         --token "$token" \
-        --name "${RUNNER_NAME:-$(hostname)-${RUNNER_INSTANCE:?RUNNER_INSTANCE is required}}" \
+        --name "${RUNNER_NAME:-$(uname --nodename)-${RUNNER_INSTANCE:?RUNNER_INSTANCE is required}}" \
         --work "${RUNNER_HOST_STATE:?RUNNER_HOST_STATE is required}/_work"
     unset token
 }
@@ -188,7 +188,7 @@ configure() {
             --volume "${state_dir}:/runner"
             --volume "${state_dir}:${state_dir}"
             --env "RUNNER_URL=${url}"
-            --env "RUNNER_NAME=$(hostname)-${instance}"
+            --env "RUNNER_NAME=$(uname --nodename)-${instance}"
             --env "RUNNER_INSTANCE=${instance}"
             --env "RUNNER_HOST_STATE=${state_dir}"
         )
