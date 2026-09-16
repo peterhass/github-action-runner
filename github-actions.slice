@@ -7,4 +7,3 @@ MemoryAccounting=yes
 IOAccounting=yes
 CPUWeight=1
 IOWeight=1
-MemoryMax=1G
