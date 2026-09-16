@@ -2,7 +2,7 @@
 set -euo pipefail
 
 docker_wrapper() {
-    local option runner_host_state="" source target volume
+    local kvm_device option runner_host_state="" source target volume
     local -a args=()
 
     while [[ $# -gt 0 ]]; do
@@ -50,7 +50,14 @@ docker_wrapper() {
         fi
     done
 
-    exec /usr/bin/podman --remote "${args[@]}"
+    kvm_device="${RUNNER_KVM_DEVICE:-}"
+    if [[ ("${args[0]:-}" == create || "${args[0]:-}" == run) \
+        && -n "$kvm_device" && -c "$kvm_device" \
+        && -r "$kvm_device" && -w "$kvm_device" ]]; then
+        args=("${args[0]}" --device "$kvm_device" --group-add keep-groups "${args[@]:1}")
+    fi
+
+    exec "${RUNNER_PODMAN_COMMAND:-/usr/bin/podman}" --remote "${args[@]}"
 }
 
 if [[ "${0##*/}" == docker ]]; then
