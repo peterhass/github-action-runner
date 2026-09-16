@@ -27,6 +27,7 @@ printf 'podman %s\n' "$*" >> "${TEST_LOG:?}"
 EOF
 
 chmod +x "${stub_dir}/lscpu" "${stub_dir}/systemctl" "${stub_dir}/podman"
+ln -s "$repo_dir/github-actions-runner" "${stub_dir}/docker"
 
 export HOME="$test_home"
 export TEST_LOG="$test_log"
@@ -36,6 +37,22 @@ cd "$repo_dir"
 bash -n github-actions-runner
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck github-actions-runner
+fi
+
+RUNNER_KVM_DEVICE=/dev/null RUNNER_PODMAN_COMMAND="${stub_dir}/podman" docker create test-image
+grep -Fq 'podman --remote create --device /dev/null --group-add keep-groups test-image' "$test_log"
+: > "$test_log"
+RUNNER_KVM_DEVICE="${test_dir}/missing-kvm" RUNNER_PODMAN_COMMAND="${stub_dir}/podman" docker create test-image
+grep -Fq 'podman --remote create test-image' "$test_log"
+grep -Fq 'AddDevice=-/dev/kvm' github-actions-runner@.container
+grep -Fq 'GroupAdd=keep-groups' github-actions-runner@.container
+! grep -q '^MemoryMax=' github-actions.slice
+
+quadlet_generator=$(find /usr/lib/systemd/system-generators /usr/libexec/podman \
+    -type f -name podman-system-generator -print -quit 2>/dev/null || true)
+if command -v podman >/dev/null 2>&1; then
+    [[ -n "$quadlet_generator" ]]
+    QUADLET_UNIT_DIRS="$repo_dir" "$quadlet_generator" --user --dryrun >/dev/null
 fi
 
 [[ "$(./github-actions-runner physical-core-count)" == 2 ]]
