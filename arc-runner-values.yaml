@@ -21,8 +21,6 @@ template:
           requests:
             cpu: 100m
             memory: 512Mi
-          limits:
-            memory: 4Gi
         volumeMounts:
           - name: kvm
             mountPath: /dev/kvm
