@@ -19,7 +19,8 @@ usage() {
 Usage: ${0##*/} COMMAND
 
 Commands:
-  configure   Configure ARC, the Nix cache, and the 0-to-6 runner scale set.
+  install     Install initially, or reconcile an existing installation without prompting.
+  configure   Configure/reconfigure GitHub authentication interactively.
   wait        Wait for the rootless K3s API to become ready.
   status      Show K3s, ARC, Nix cache, and runner status.
   logs        Follow ARC controller and listener logs.
@@ -52,21 +53,16 @@ preflight_kvm() {
     }
 }
 
-configure() {
-    local url token tmp
+preflight() {
     wait_for_k3s
     preflight_kvm
     [[ -f "$CONTROLLER_VALUES" && -f "$RUNNER_VALUES" && -f "$NIX_CACHE_MANIFEST" ]] || {
         printf 'Installed configuration files are missing; run make install.\n' >&2
         return 1
     }
+}
 
-    read -r -p 'GitHub repository or organization URL: ' url
-    [[ "$url" == https://github.com/* ]] || { printf 'URL must use https://github.com/.\n' >&2; return 1; }
-    read -r -s -p 'GitHub PAT: ' token
-    printf '\n'
-    [[ -n "$token" ]] || { printf 'PAT cannot be empty.\n' >&2; return 1; }
-
+install_controller_and_cache() {
     helm upgrade --install "$CONTROLLER_RELEASE" \
         --namespace "$CONTROLLER_NAMESPACE" --create-namespace \
         --version "$ARC_VERSION" --wait \
@@ -76,6 +72,29 @@ configure() {
     kubectl_cmd create namespace "$RUNNER_NAMESPACE" --dry-run=client -o yaml | kubectl_cmd apply -f -
     kubectl_cmd apply -f "$NIX_CACHE_MANIFEST"
     kubectl_cmd -n "$RUNNER_NAMESPACE" rollout status deployment/nix-cache --timeout=120s
+}
+
+install_runner() {
+    local url=$1
+    helm upgrade --install "$RUNNER_RELEASE" \
+        --namespace "$RUNNER_NAMESPACE" --create-namespace \
+        --version "$ARC_VERSION" --wait \
+        --set-string "githubConfigUrl=${url}" \
+        -f "$RUNNER_VALUES" \
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+}
+
+configure() {
+    local url token tmp
+    preflight
+
+    read -r -p 'GitHub repository or organization URL: ' url
+    [[ "$url" == https://github.com/* ]] || { printf 'URL must use https://github.com/.\n' >&2; return 1; }
+    read -r -s -p 'GitHub PAT: ' token
+    printf '\n'
+    [[ -n "$token" ]] || { printf 'PAT cannot be empty.\n' >&2; return 1; }
+
+    install_controller_and_cache
 
     tmp=$(mktemp)
     trap 'rm -f "$tmp"' RETURN
@@ -87,14 +106,34 @@ configure() {
     rm -f "$tmp"
     trap - RETURN
 
-    helm upgrade --install "$RUNNER_RELEASE" \
-        --namespace "$RUNNER_NAMESPACE" --create-namespace \
-        --version "$ARC_VERSION" --wait \
-        --set-string "githubConfigUrl=${url}" \
-        -f "$RUNNER_VALUES" \
-        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
-
+    install_runner "$url"
     printf '\nRunner scale set installed as: self-hosted-k3s\nUse: runs-on: self-hosted-k3s\n'
+}
+
+install_or_update() {
+    local url
+    preflight
+
+    if ! helm status "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" >/dev/null 2>&1; then
+        printf 'No existing runner scale set found; starting initial configuration.\n'
+        configure
+        return
+    fi
+
+    url=$(helm get values "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" -o json | \
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("githubConfigUrl", ""))')
+    [[ "$url" == https://github.com/* ]] || {
+        printf 'Could not recover githubConfigUrl from the existing Helm release; run make configure.\n' >&2
+        return 1
+    }
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get secret "$SECRET_NAME" >/dev/null 2>&1 || {
+        printf 'Existing GitHub credential secret is missing; run make configure.\n' >&2
+        return 1
+    }
+
+    install_controller_and_cache
+    install_runner "$url"
+    printf '\nExisting runner installation updated without changing GitHub credentials.\n'
 }
 
 status() {
@@ -164,6 +203,7 @@ uninstall() {
 main() {
     [[ $# -eq 1 ]] || { usage >&2; return 1; }
     case "$1" in
+        install) install_or_update ;;
         configure) configure ;;
         wait) wait_for_k3s ;;
         status) status ;;
