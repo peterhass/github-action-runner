@@ -11,6 +11,7 @@ install:
 	install -D --mode=0644 ./k3s-rootless.service $(SYSTEMD_DIR)/k3s-rootless.service
 	install -D --mode=0644 ./arc-controller-values.yaml $(DATA_DIR)/arc-controller-values.yaml
 	install -D --mode=0644 ./arc-runner-values.yaml $(DATA_DIR)/arc-runner-values.yaml
+	install -D --mode=0644 ./nix-cache.yaml $(DATA_DIR)/nix-cache.yaml
 	systemctl --user daemon-reload
 	systemctl --user enable --now k3s-rootless.service
 	$(BIN_DIR)/github-actions-runner wait
