@@ -1,0 +1,47 @@
+# githubConfigUrl is supplied by github-actions-runner configure.
+githubConfigSecret: github-actions-runner
+runnerScaleSetName: self-hosted-k3s
+minRunners: 0
+maxRunners: 6
+
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        # Root here maps to the unprivileged K3s user on the host. This also
+        # preserves that user's access to /dev/kvm through the user namespace.
+        securityContext:
+          runAsUser: 0
+        env:
+          - name: RUNNER_ALLOW_RUNASROOT
+            value: "1"
+          - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+            value: /opt/github-actions-runner-hooks/job-started.sh
+          - name: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+            value: /opt/github-actions-runner-hooks/job-completed.sh
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        volumeMounts:
+          - name: kvm
+            mountPath: /dev/kvm
+          - name: nix-cache
+            mountPath: /nix-cache
+          - name: nix-cache-hooks
+            mountPath: /opt/github-actions-runner-hooks
+            readOnly: true
+    volumes:
+      - name: kvm
+        hostPath:
+          path: /dev/kvm
+          type: CharDevice
+      - name: nix-cache
+        persistentVolumeClaim:
+          claimName: nix-cache
+      - name: nix-cache-hooks
+        configMap:
+          name: nix-cache-hooks
+          defaultMode: 0755

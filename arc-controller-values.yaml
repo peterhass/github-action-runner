@@ -1,0 +1,2 @@
+# Intentionally small: one controller for this single-node CI cluster.
+replicaCount: 1

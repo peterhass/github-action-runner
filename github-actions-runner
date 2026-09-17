@@ -1,307 +1,217 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-docker_wrapper() {
-    local option runner_host_state="" source target volume
-    local -a args=()
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -v|--volume)
-                [[ $# -ge 2 ]] || { printf '%s requires an argument.\n' "$1" >&2; return 2; }
-                option="$1"
-                volume="$2"
-                shift 2
-                ;;
-            -v=*|--volume=*)
-                option="${1%%=*}="
-                volume="${1#*=}"
-                shift
-                ;;
-            *)
-                args+=("$1")
-                shift
-                continue
-                ;;
-        esac
-
-        source="${volume%%:*}"
-        target="${volume#*:}"
-        target="${target%%:*}"
-        if [[ "$target" == /__w && "$source" == */_work ]]; then
-            runner_host_state="${source%/_work}"
-        fi
-        # The runner adds docker.sock automatically; reject any host API socket source.
-        case "$source" in
-            /run/docker.sock|/var/run/docker.sock|*/podman/podman.sock) continue ;;
-        esac
-        if [[ "$volume" == /runner:* || "$volume" == /runner/*:* ]]; then
-            [[ -n "$runner_host_state" ]] || {
-                printf 'Cannot translate runner mount without the /__w workspace mount.\n' >&2
-                return 2
-            }
-            volume="${runner_host_state}${volume#/runner}"
-        fi
-
-        if [[ "$option" == *= ]]; then
-            args+=("${option}${volume}")
-        else
-            args+=("$option" "$volume")
-        fi
-    done
-
-    exec /usr/bin/podman --remote "${args[@]}"
-}
-
-if [[ "${0##*/}" == docker ]]; then
-    docker_wrapper "$@"
-fi
-
-IMAGE="localhost/github-actions-runner:latest"
 DATA_DIR="${HOME}/.local/share/github-actions-runner"
-IMAGE_DIR="${DATA_DIR}/image"
-STATE_DIR="${DATA_DIR}/state"
-COUNT_FILE="${DATA_DIR}/runner-count"
-BUILD_SERVICE="github-actions-runner-build.service"
+KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/k3s.yaml}"
+export KUBECONFIG
+CONTROLLER_VALUES="${DATA_DIR}/arc-controller-values.yaml"
+RUNNER_VALUES="${DATA_DIR}/arc-runner-values.yaml"
+NIX_CACHE_MANIFEST="${DATA_DIR}/nix-cache.yaml"
+ARC_VERSION="${ARC_VERSION:-0.14.2}"
+CONTROLLER_RELEASE="arc"
+CONTROLLER_NAMESPACE="arc-systems"
+RUNNER_RELEASE="github-actions-runner"
+RUNNER_NAMESPACE="arc-runners"
+SECRET_NAME="github-actions-runner"
 
 usage() {
     cat <<EOF
 Usage: ${0##*/} COMMAND
 
 Commands:
-  configure       Register the runner if it is not already registered.
-  status          Show the runner service status.
-  logs            Follow the runner service journal.
-  update-hooks    Rebuild with the latest official container hooks.
-  unregister      Remove the runner registration from GitHub.
-  physical-core-count
-                  Show the number of physical CPU cores.
+  install     Install initially, or reconcile an existing installation without prompting.
+  configure   Configure/reconfigure GitHub authentication interactively.
+  wait        Wait for the rootless K3s API to become ready.
+  status      Show K3s, ARC, Nix cache, and runner status.
+  logs        Follow ARC controller and listener logs.
+  kvm-test    Verify a rootless pod can open /dev/kvm.
+  uninstall   Remove ARC and stop the rootless K3s service.
 EOF
 }
 
-physical_core_count() {
-    local count
-    command -v lscpu >/dev/null 2>&1 || {
-        printf 'lscpu is required to detect physical CPU cores.\n' >&2
-        return 1
-    }
-    count=$(LC_ALL=C lscpu --parse=CORE,SOCKET \
-        | awk -F, '!/^#/ { print $1 "," $2 }' \
-        | sort --unique \
-        | wc --lines)
-    [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
-        printf 'Could not determine the number of physical CPU cores.\n' >&2
-        return 1
-    }
-    printf '%d\n' "$count"
+kubectl_cmd() {
+    k3s kubectl "$@"
 }
 
-runner_count() {
-    local count
-    if [[ -f "$COUNT_FILE" ]]; then
-        IFS= read -r count < "$COUNT_FILE"
-    else
-        count=$(physical_core_count)
-    fi
-    [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
-        printf 'Invalid runner count: %s\n' "$count" >&2
-        return 1
-    }
-    printf '%d\n' "$count"
-}
-
-runner_services() {
-    local count instance
-    count=$(runner_count)
-    SERVICES=()
-    for ((instance = 1; instance <= count; instance++)); do
-        SERVICES+=("github-actions-runner@${instance}.service")
+wait_for_k3s() {
+    local i
+    for ((i=0; i<60; i++)); do
+        if [[ -r "$KUBECONFIG" ]] && kubectl_cmd get nodes >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
     done
+    printf 'Timed out waiting for rootless K3s. Check: journalctl --user -u k3s-rootless\n' >&2
+    return 1
 }
 
-container_initialise() {
-    if [[ ! -x /runner/run.sh ]]; then
-        cp -a /opt/actions-runner/. /runner/
-    fi
+preflight_kvm() {
+    [[ -e /dev/kvm ]] || { printf '/dev/kvm does not exist; enable KVM in the host kernel/firmware.\n' >&2; return 1; }
+    [[ -r /dev/kvm && -w /dev/kvm ]] || {
+        printf '%s cannot read/write /dev/kvm. Add the user to the kvm group, then start a new login session.\n' "$USER" >&2
+        return 1
+    }
 }
 
-container_run() {
-    container_initialise
-    cd /runner
-    exec /runner/run.sh
+preflight() {
+    wait_for_k3s
+    preflight_kvm
+    [[ -f "$CONTROLLER_VALUES" && -f "$RUNNER_VALUES" && -f "$NIX_CACHE_MANIFEST" ]] || {
+        printf 'Installed configuration files are missing; run make install.\n' >&2
+        return 1
+    }
 }
 
-container_configure() {
-    local token
-    container_initialise
-    IFS= read -r token
-    [[ -n "$token" ]] || { printf 'Registration token cannot be empty.\n' >&2; return 1; }
-    cd /runner
-    /runner/config.sh --unattended \
-        --url "${RUNNER_URL:?RUNNER_URL is required}" \
-        --token "$token" \
-        --name "${RUNNER_NAME:-$(uname --nodename)-${RUNNER_INSTANCE:?RUNNER_INSTANCE is required}}" \
-        --work "${RUNNER_HOST_STATE:?RUNNER_HOST_STATE is required}/_work"
-    unset token
+install_controller_and_cache() {
+    helm upgrade --install "$CONTROLLER_RELEASE" \
+        --namespace "$CONTROLLER_NAMESPACE" --create-namespace \
+        --version "$ARC_VERSION" --wait \
+        -f "$CONTROLLER_VALUES" \
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+
+    kubectl_cmd create namespace "$RUNNER_NAMESPACE" --dry-run=client -o yaml | kubectl_cmd apply -f -
+    kubectl_cmd apply -f "$NIX_CACHE_MANIFEST"
+    kubectl_cmd -n "$RUNNER_NAMESPACE" rollout status deployment/nix-cache --timeout=120s
 }
 
-container_unregister() {
-    local token
-    container_initialise
-    IFS= read -r token
-    [[ -n "$token" ]] || { printf 'Removal token cannot be empty.\n' >&2; return 1; }
-    cd /runner
-    /runner/config.sh remove --unattended --token "$token"
-    unset token
+install_runner() {
+    local url=$1
+    helm upgrade --install "$RUNNER_RELEASE" \
+        --namespace "$RUNNER_NAMESPACE" --create-namespace \
+        --version "$ARC_VERSION" --wait \
+        --set-string "githubConfigUrl=${url}" \
+        -f "$RUNNER_VALUES" \
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 }
 
 configure() {
-    local count instance state_dir url token
-    local -a missing=()
-    local -a podman_args
+    local url token tmp
+    preflight
 
-    count=$(runner_count)
-    for ((instance = 1; instance <= count; instance++)); do
-        state_dir="${STATE_DIR}-${instance}"
-        mkdir -p "$state_dir"
-        [[ -f "${state_dir}/.runner" ]] || missing+=("$instance")
-    done
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        printf 'All %d runners are already registered.\n' "$count"
+    read -r -p 'GitHub repository or organization URL: ' url
+    [[ "$url" == https://github.com/* ]] || { printf 'URL must use https://github.com/.\n' >&2; return 1; }
+    read -r -s -p 'GitHub PAT: ' token
+    printf '\n'
+    [[ -n "$token" ]] || { printf 'PAT cannot be empty.\n' >&2; return 1; }
+
+    install_controller_and_cache
+
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' RETURN
+    chmod 600 "$tmp"
+    printf '%s' "$token" > "$tmp"
+    unset token
+    kubectl_cmd -n "$RUNNER_NAMESPACE" create secret generic "$SECRET_NAME" \
+        --from-file=github_token="$tmp" --dry-run=client -o yaml | kubectl_cmd apply -f -
+    rm -f "$tmp"
+    trap - RETURN
+
+    install_runner "$url"
+    printf '\nRunner scale set installed as: self-hosted-k3s\nUse: runs-on: self-hosted-k3s\n'
+}
+
+install_or_update() {
+    local url
+    preflight
+
+    if ! helm status "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" >/dev/null 2>&1; then
+        printf 'No existing runner scale set found; starting initial configuration.\n'
+        configure
         return
     fi
 
-    read -r -p 'GitHub repository or organization URL: ' url
-    [[ "$url" == https://github.com/* || "$url" == https://github.com ]] || {
-        printf 'URL must use https://github.com.\n' >&2
+    url=$(helm get values "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" -o json | \
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("githubConfigUrl", ""))')
+    [[ "$url" == https://github.com/* ]] || {
+        printf 'Could not recover githubConfigUrl from the existing Helm release; run make configure.\n' >&2
         return 1
     }
-    read -r -s -p 'GitHub runner registration token: ' token
-    printf '\n'
-    [[ -n "$token" ]] || { printf 'Registration token cannot be empty.\n' >&2; return 1; }
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get secret "$SECRET_NAME" >/dev/null 2>&1 || {
+        printf 'Existing GitHub credential secret is missing; run make configure.\n' >&2
+        return 1
+    }
 
-    for instance in "${missing[@]}"; do
-        state_dir="${STATE_DIR}-${instance}"
-        podman_args=(
-            --rm --interactive
-            --security-opt label=disable
-            --volume "${state_dir}:/runner"
-            --volume "${state_dir}:${state_dir}"
-            --env "RUNNER_URL=${url}"
-            --env "RUNNER_NAME=$(uname --nodename)-${instance}"
-            --env "RUNNER_INSTANCE=${instance}"
-            --env "RUNNER_HOST_STATE=${state_dir}"
-        )
-        printf 'Registering runner %d of %d.\n' "$instance" "$count"
-        printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-configure
-    done
-    unset token
+    install_controller_and_cache
+    install_runner "$url"
+    printf '\nExisting runner installation updated without changing GitHub credentials.\n'
 }
 
 status() {
-    runner_services
-    systemctl --user status "${SERVICES[@]}"
+    systemctl --user --no-pager status k3s-rootless.service || true
+    printf '\nKubernetes:\n'
+    kubectl_cmd get nodes
+    kubectl_cmd get pods -A
+    printf '\nNix cache:\n'
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get pvc nix-cache
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get service nix-cache
 }
 
 logs() {
-    local service
-    local -a journal_args=()
-    runner_services
-    for service in "${SERVICES[@]}"; do
-        journal_args+=(--unit "$service")
-    done
-    journalctl --user "${journal_args[@]}" --follow
+    wait_for_k3s
+    kubectl_cmd -n "$CONTROLLER_NAMESPACE" logs -l app.kubernetes.io/name=gha-runner-scale-set-controller --all-containers --prefix --follow &
+    local p1=$!
+    kubectl_cmd -n "$RUNNER_NAMESPACE" logs -l actions.github.com/scale-set-name=self-hosted-k3s --all-containers --prefix --follow &
+    local p2=$!
+    trap 'kill "$p1" "$p2" 2>/dev/null || true' EXIT INT TERM
+    wait
 }
 
-update_hooks() {
-    local release hooks_version hooks_sha
-    [[ -f "${IMAGE_DIR}/Containerfile" && -f "${IMAGE_DIR}/github-actions-runner" ]] || {
-        printf 'Image sources are missing; run make install from the repository first.\n' >&2
+kvm_test() {
+    wait_for_k3s
+    preflight_kvm
+    cat <<'YAML' | kubectl_cmd apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kvm-test
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: test
+      image: archlinux:latest
+      command: ["/bin/bash", "-ceu", "test -r /dev/kvm && test -w /dev/kvm && stat /dev/kvm"]
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: kvm
+          mountPath: /dev/kvm
+  volumes:
+    - name: kvm
+      hostPath:
+        path: /dev/kvm
+        type: CharDevice
+YAML
+    kubectl_cmd wait --for=jsonpath='{.status.phase}'=Succeeded pod/kvm-test --timeout=120s || {
+        kubectl_cmd describe pod/kvm-test
+        kubectl_cmd logs kvm-test || true
         return 1
     }
-
-    release=$(curl --fail --location --silent --show-error \
-        https://api.github.com/repos/actions/runner-container-hooks/releases/latest)
-    read -r hooks_version hooks_sha < <(python3 -c '
-import json, sys
-r = json.load(sys.stdin)
-asset = next(a for a in r["assets"] if a["name"].startswith("actions-runner-hooks-docker-"))
-print(r["tag_name"].removeprefix("v"), asset["digest"].removeprefix("sha256:"))
-' <<<"$release")
-
-    python3 - "${IMAGE_DIR}/Containerfile" "$hooks_version" "$hooks_sha" <<'PY'
-import pathlib
-import re
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-text, version_count = re.subn(r"^ARG HOOKS_VERSION=.*$", f"ARG HOOKS_VERSION={sys.argv[2]}", text, flags=re.M)
-text, sha_count = re.subn(r"^ARG HOOKS_SHA256=.*$", f"ARG HOOKS_SHA256={sys.argv[3]}", text, flags=re.M)
-if version_count != 1 or sha_count != 1:
-    raise SystemExit("Could not update hook build arguments")
-path.write_text(text)
-PY
-    systemctl --user restart "$BUILD_SERVICE"
-    runner_services
-    systemctl --user restart "${SERVICES[@]}"
+    kubectl_cmd logs kvm-test
+    kubectl_cmd delete pod kvm-test --wait=false
 }
 
-unregister() {
-    local instance state_dir token
-    local -a registered=()
-    local -a podman_args
-    local -a services=()
-
-    for state_dir in "${STATE_DIR}-"*; do
-        [[ -f "${state_dir}/.runner" ]] || continue
-        instance="${state_dir#"${STATE_DIR}-"}"
-        [[ "$instance" =~ ^[1-9][0-9]*$ ]] || continue
-        registered+=("$instance")
-        services+=("github-actions-runner@${instance}.service")
-    done
-    if [[ ${#registered[@]} -eq 0 ]]; then
-        printf 'No runners are registered.\n'
-        return
+uninstall() {
+    if [[ -r "$KUBECONFIG" ]]; then
+        helm uninstall "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" 2>/dev/null || true
+        kubectl_cmd delete -f "$NIX_CACHE_MANIFEST" --ignore-not-found 2>/dev/null || true
+        helm uninstall "$CONTROLLER_RELEASE" -n "$CONTROLLER_NAMESPACE" 2>/dev/null || true
     fi
-
-    systemctl --user stop "${services[@]}" 2>/dev/null || true
-    read -r -s -p 'GitHub runner removal token: ' token
-    printf '\n'
-    [[ -n "$token" ]] || { printf 'Removal token cannot be empty.\n' >&2; return 1; }
-    for instance in "${registered[@]}"; do
-        state_dir="${STATE_DIR}-${instance}"
-        podman_args=(
-            --rm --interactive
-            --security-opt label=disable
-            --volume "${state_dir}:/runner"
-            --volume "${state_dir}:${state_dir}"
-        )
-        printf 'Unregistering runner %d.\n' "$instance"
-        printf '%s\n' "$token" | podman run "${podman_args[@]}" "$IMAGE" container-unregister
-    done
-    unset token
+    systemctl --user disable --now k3s-rootless.service 2>/dev/null || true
 }
 
 main() {
-    local command="${1:-}"
-    [[ $# -le 1 ]] || { usage >&2; return 1; }
-    case "$command" in
+    [[ $# -eq 1 ]] || { usage >&2; return 1; }
+    case "$1" in
+        install) install_or_update ;;
         configure) configure ;;
+        wait) wait_for_k3s ;;
         status) status ;;
         logs) logs ;;
-        update-hooks) update_hooks ;;
-        unregister) unregister ;;
-        physical-core-count) physical_core_count ;;
-        container-run) container_run ;;
-        container-configure) container_configure ;;
-        container-unregister) container_unregister ;;
+        kvm-test) kvm_test ;;
+        uninstall) uninstall ;;
         -h|--help) usage ;;
-        *)
-            [[ -n "$command" ]] && printf 'Unknown command: %s\n' "$command" >&2
-            usage >&2
-            return 1
-            ;;
+        *) printf 'Unknown command: %s\n' "$1" >&2; usage >&2; return 1 ;;
     esac
 }
 
