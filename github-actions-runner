@@ -6,6 +6,7 @@ KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/k3s.yaml}"
 export KUBECONFIG
 CONTROLLER_VALUES="${DATA_DIR}/arc-controller-values.yaml"
 RUNNER_VALUES="${DATA_DIR}/arc-runner-values.yaml"
+NIX_CACHE_MANIFEST="${DATA_DIR}/nix-cache.yaml"
 ARC_VERSION="${ARC_VERSION:-0.14.2}"
 CONTROLLER_RELEASE="arc"
 CONTROLLER_NAMESPACE="arc-systems"
@@ -18,9 +19,9 @@ usage() {
 Usage: ${0##*/} COMMAND
 
 Commands:
-  configure   Configure ARC and the 0-to-6 runner scale set.
+  configure   Configure ARC, the Nix cache, and the 0-to-6 runner scale set.
   wait        Wait for the rootless K3s API to become ready.
-  status      Show K3s, ARC, and runner status.
+  status      Show K3s, ARC, Nix cache, and runner status.
   logs        Follow ARC controller and listener logs.
   kvm-test    Verify a rootless pod can open /dev/kvm.
   uninstall   Remove ARC and stop the rootless K3s service.
@@ -55,8 +56,8 @@ configure() {
     local url token tmp
     wait_for_k3s
     preflight_kvm
-    [[ -f "$CONTROLLER_VALUES" && -f "$RUNNER_VALUES" ]] || {
-        printf 'Installed values files are missing; run make install.\n' >&2
+    [[ -f "$CONTROLLER_VALUES" && -f "$RUNNER_VALUES" && -f "$NIX_CACHE_MANIFEST" ]] || {
+        printf 'Installed configuration files are missing; run make install.\n' >&2
         return 1
     }
 
@@ -73,6 +74,9 @@ configure() {
         oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
 
     kubectl_cmd create namespace "$RUNNER_NAMESPACE" --dry-run=client -o yaml | kubectl_cmd apply -f -
+    kubectl_cmd apply -f "$NIX_CACHE_MANIFEST"
+    kubectl_cmd -n "$RUNNER_NAMESPACE" rollout status deployment/nix-cache --timeout=120s
+
     tmp=$(mktemp)
     trap 'rm -f "$tmp"' RETURN
     chmod 600 "$tmp"
@@ -98,6 +102,9 @@ status() {
     printf '\nKubernetes:\n'
     kubectl_cmd get nodes
     kubectl_cmd get pods -A
+    printf '\nNix cache:\n'
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get pvc nix-cache
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get service nix-cache
 }
 
 logs() {
@@ -148,6 +155,7 @@ YAML
 uninstall() {
     if [[ -r "$KUBECONFIG" ]]; then
         helm uninstall "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" 2>/dev/null || true
+        kubectl_cmd delete -f "$NIX_CACHE_MANIFEST" --ignore-not-found 2>/dev/null || true
         helm uninstall "$CONTROLLER_RELEASE" -n "$CONTROLLER_NAMESPACE" 2>/dev/null || true
     fi
     systemctl --user disable --now k3s-rootless.service 2>/dev/null || true
