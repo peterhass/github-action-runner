@@ -14,5 +14,11 @@ grep -Fq 'CPUWeight=10' k3s-rootless.service
 grep -Fq 'minRunners: 0' arc-runner-values.yaml
 grep -Fq 'maxRunners: 6' arc-runner-values.yaml
 grep -Fq 'path: /dev/kvm' arc-runner-values.yaml
+grep -Fq 'claimName: nix-cache' arc-runner-values.yaml
+grep -Fq 'ACTIONS_RUNNER_HOOK_JOB_STARTED' arc-runner-values.yaml
+grep -Fq 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED' arc-runner-values.yaml
+grep -Fq 'storage: 100Gi' nix-cache.yaml
+grep -Fq 'extra-substituters = http://nix-cache.arc-runners.svc.cluster.local?trusted=true&priority=10' nix-cache.yaml
+grep -Fq "nix copy --all --to 'file:///nix-cache?compression=zstd&compression-level=1'" nix-cache.yaml
 ! grep -Eq '^[[:space:]]+cpu:' arc-runner-values.yaml || [[ "$(grep -Ec '^[[:space:]]+cpu: 100m$' arc-runner-values.yaml)" == 1 ]]
 ! grep -Fq 'podman' Makefile
