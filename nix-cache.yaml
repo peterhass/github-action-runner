@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nix-cache
+  namespace: arc-runners
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nix-cache-hooks
+  namespace: arc-runners
+data:
+  job-started.sh: |
+    #!/bin/sh
+    set -eu
+    if [ -n "${GITHUB_ENV:-}" ]; then
+      cat >>"$GITHUB_ENV" <<'EOF'
+    NIX_CONFIG<<NIX_CONFIG_EOF
+    extra-substituters = http://nix-cache.arc-runners.svc.cluster.local?trusted=true&priority=10
+    max-jobs = auto
+    NIX_CONFIG_EOF
+    EOF
+    fi
+  job-completed.sh: |
+    #!/bin/sh
+    # Cache the disposable runner's Nix store for later runners. Cache upload
+    # is best-effort so a cache problem never changes the job result.
+    command -v nix >/dev/null 2>&1 || exit 0
+    mkdir -p /nix-cache
+    if command -v flock >/dev/null 2>&1; then
+      timeout 300 flock /nix-cache/.upload.lock \
+        nix copy --all --to 'file:///nix-cache?compression=zstd&compression-level=1' || true
+    else
+      timeout 300 nix copy --all --to 'file:///nix-cache?compression=zstd&compression-level=1' || true
+    fi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nix-cache
+  namespace: arc-runners
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nix-cache
+  template:
+    metadata:
+      labels:
+        app: nix-cache
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: cache
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: nix-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nix-cache
+  namespace: arc-runners
+spec:
+  selector:
+    app: nix-cache
+  ports:
+    - port: 80
+      targetPort: 80
