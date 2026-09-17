@@ -4,7 +4,9 @@ Description=k3s (Rootless GitHub Actions cluster)
 
 [Service]
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/usr/local/bin/k3s server --rootless --snapshotter=fuse-overlayfs --disable=traefik --disable=servicelb --disable=metrics-server
+# Resolve k3s through PATH so both upstream (/usr/local/bin) and distro (/usr/bin)
+# installations work, including Arch's k3s-bin package.
+ExecStart=k3s server --rootless --snapshotter=fuse-overlayfs --disable=traefik --disable=servicelb --disable=metrics-server
 ExecReload=/bin/kill -s HUP $MAINPID
 TimeoutSec=0
 RestartSec=2
