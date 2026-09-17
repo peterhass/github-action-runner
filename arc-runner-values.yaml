@@ -17,6 +17,10 @@ template:
         env:
           - name: RUNNER_ALLOW_RUNASROOT
             value: "1"
+          - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+            value: /opt/github-actions-runner-hooks/job-started.sh
+          - name: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+            value: /opt/github-actions-runner-hooks/job-completed.sh
         resources:
           requests:
             cpu: 100m
@@ -24,8 +28,20 @@ template:
         volumeMounts:
           - name: kvm
             mountPath: /dev/kvm
+          - name: nix-cache
+            mountPath: /nix-cache
+          - name: nix-cache-hooks
+            mountPath: /opt/github-actions-runner-hooks
+            readOnly: true
     volumes:
       - name: kvm
         hostPath:
           path: /dev/kvm
           type: CharDevice
+      - name: nix-cache
+        persistentVolumeClaim:
+          claimName: nix-cache
+      - name: nix-cache-hooks
+        configMap:
+          name: nix-cache-hooks
+          defaultMode: 0755
