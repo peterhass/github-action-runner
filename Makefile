@@ -7,6 +7,7 @@ SYSTEMD_DIR := $(HOME)/.config/systemd/user
 install:
 	command -v k3s >/dev/null || { echo 'k3s is required; see README.md' >&2; exit 1; }
 	command -v helm >/dev/null || { echo 'helm is required; see README.md' >&2; exit 1; }
+	command -v python3 >/dev/null || { echo 'python3 is required; see README.md' >&2; exit 1; }
 	install -D --mode=0755 ./github-actions-runner $(BIN_DIR)/github-actions-runner
 	install -D --mode=0644 ./k3s-rootless.service $(SYSTEMD_DIR)/k3s-rootless.service
 	install -D --mode=0644 ./arc-controller-values.yaml $(DATA_DIR)/arc-controller-values.yaml
@@ -15,7 +16,7 @@ install:
 	systemctl --user daemon-reload
 	systemctl --user enable --now k3s-rootless.service
 	$(BIN_DIR)/github-actions-runner wait
-	$(BIN_DIR)/github-actions-runner configure
+	$(BIN_DIR)/github-actions-runner install
 
 configure:
 	$(BIN_DIR)/github-actions-runner configure
