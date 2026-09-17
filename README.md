@@ -40,7 +40,7 @@ cd github-action-runner
 make install
 ```
 
-`make install` installs and starts the rootless K3s user service, waits for Kubernetes, installs the official ARC controller Helm chart, and prompts for:
+`make install` installs and starts the rootless K3s user service, waits for Kubernetes, installs the official ARC controller Helm chart, deploys the persistent Nix cache, and prompts for:
 
 1. the GitHub repository or organization URL;
 2. a GitHub PAT used by ARC.
@@ -59,7 +59,7 @@ minRunners: 0
 maxRunners: 6
 ```
 
-With no queued work, only K3s, the ARC controller, and its listener remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs.
+With no queued work, only K3s, the ARC controller, its listener, and the small Nix cache server remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs.
 
 Use the scale-set name in workflows:
 
@@ -73,6 +73,16 @@ jobs:
 ```
 
 The runner image is intentionally not configured with Docker-in-Docker. Jobs run directly in the ephemeral runner pod. If a workflow uses `container:` or `services:`, add an ARC container mode appropriate for that workflow.
+
+## Nix cache
+
+A shared Nix binary cache is part of the runner installation. K3s provisions a 100 GiB `nix-cache` persistent volume, an nginx pod serves it inside the cluster, and every runner mounts the same cache read/write.
+
+Runner job hooks automatically configure Nix with the in-cluster cache as an additional trusted substituter and `max-jobs = auto`. At the end of a job, if Nix was installed by the workflow, the runner copies its disposable Nix store into the persistent binary cache. Upload is serialized between runners and is best-effort so a cache failure does not turn a successful workflow into a failure.
+
+This intentionally caches the complete Nix store from a Nix-using job, including substituted dependencies. That costs local disk space but makes later ephemeral runners independent of the previous runner's `/nix/store` and avoids repeated downloads/builds. Repositories do not need cache-specific workflow configuration.
+
+The cache is trusted without signatures because it is private to this rootless single-node CI cluster and writable only by its runner pods. Do not expose the `nix-cache` Service outside the cluster.
 
 ## KVM
 
@@ -90,18 +100,18 @@ This creates a temporary pod with the same `/dev/kvm` hostPath and verifies read
 
 There is deliberately **no Kubernetes CPU limit**. Each runner requests only `100m` for scheduling, while `k3s-rootless.service` uses low `CPUWeight`, `IOWeight`, and a high nice value. CI can therefore consume the whole CPU when it is idle but loses contention to ordinary work in the same user manager.
 
-Each runner has a 4 GiB memory limit. Six runners can therefore consume at most 24 GiB in their runner containers, leaving headroom on a 32 GiB workstation. Adjust this in `arc-runner-values.yaml` if VM memory requirements differ.
+There is deliberately **no per-runner memory limit**. Memory-heavy Nix builds can use available RAM instead of being killed at an arbitrary pod limit. If the host comes under genuine memory pressure, normal Linux/cgroup OOM policy applies to the CI processes.
 
 ## Commands
 
 ```text
-make status      Show K3s and Kubernetes pod status
+make status      Show K3s, Kubernetes, and Nix cache status
 make logs        Follow ARC controller/listener logs
 make restart     Restart rootless K3s
 make disable     Stop and disable rootless K3s
-make configure   Re-run ARC configuration
+make configure   Re-run ARC and Nix cache configuration
 make kvm-test    Verify /dev/kvm from a rootless pod
-make uninstall   Remove ARC and local configuration
+make uninstall   Remove ARC, the Nix cache, and local configuration
 make test        Run repository smoke tests
 ```
 
@@ -115,7 +125,7 @@ journalctl --user -u k3s-rootless -f
 
 - Helper command: `~/.local/bin/github-actions-runner`
 - Rootless K3s unit: `~/.config/systemd/user/k3s-rootless.service`
-- Installed ARC values: `~/.local/share/github-actions-runner/`
+- Installed ARC/cache configuration: `~/.local/share/github-actions-runner/`
 - Kubeconfig: `~/.kube/k3s.yaml`
 
 ## Security
