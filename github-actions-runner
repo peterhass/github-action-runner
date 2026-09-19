@@ -50,10 +50,198 @@ wait_for_k3s() {
 
 sleep_inhibit() {
     local pod_states
+    local kubectl_args=(
+        -n "$RUNNER_NAMESPACE"
+        get pods
+        -l "actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME"
+        -o 'jsonpath={range .items[*]}{.status.phase}{"\\n"}{end}'
+    )
+    local inhibitor=(
+        systemd-inhibit
+        --what=idle:sleep
+        --who=github-actions-runner
+        --why='GitHub Actions job is running'
+        --mode=block
+    )
     while :; do
-        pod_states=$(kubectl_cmd -n "$RUNNER_NAMESPACE" get pods             -l "actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME"             -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null || true)
-        if grep -Eq '^(Pending|Running)$' <<<"$pod_states"; then
-            systemd-inhibit                 --what=idle:sleep                 --who=github-actions-runner                 --why='GitHub Actions job is running'                 --mode=block                 sleep 30
+        pod_states=$(kubectl_cmd "${kubectl_args[@]}" 2>/dev/null || true)
+        if grep -Eq '^(Pending|Running)
+
+preflight_kvm() {
+    [[ -e /dev/kvm ]] || { printf '/dev/kvm does not exist; enable KVM in the host kernel/firmware.\n' >&2; return 1; }
+    [[ -r /dev/kvm && -w /dev/kvm ]] || {
+        printf '%s cannot read/write /dev/kvm. Add the user to the kvm group, then start a new login session.\n' "$USER" >&2
+        return 1
+    }
+}
+
+preflight() {
+    wait_for_k3s
+    preflight_kvm
+    [[ -f "$CONTROLLER_VALUES" && -f "$RUNNER_VALUES" && -f "$NIX_CACHE_MANIFEST" ]] || {
+        printf 'Installed configuration files are missing; run make install.\n' >&2
+        return 1
+    }
+}
+
+install_controller_and_cache() {
+    helm upgrade --install "$CONTROLLER_RELEASE" \
+        --namespace "$CONTROLLER_NAMESPACE" --create-namespace \
+        --version "$ARC_VERSION" --wait \
+        -f "$CONTROLLER_VALUES" \
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+
+    kubectl_cmd create namespace "$RUNNER_NAMESPACE" --dry-run=client -o yaml | kubectl_cmd apply -f -
+    kubectl_cmd apply -f "$NIX_CACHE_MANIFEST"
+    kubectl_cmd -n "$RUNNER_NAMESPACE" rollout status deployment/nix-cache --timeout=120s
+}
+
+install_runner() {
+    local url=$1
+    helm upgrade --install "$RUNNER_RELEASE" \
+        --namespace "$RUNNER_NAMESPACE" --create-namespace \
+        --version "$ARC_VERSION" --wait \
+        --set-string "githubConfigUrl=${url}" \
+        -f "$RUNNER_VALUES" \
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+}
+
+configure() {
+    local url token tmp
+    preflight
+
+    read -r -p 'GitHub repository or organization URL: ' url
+    [[ "$url" == https://github.com/* ]] || { printf 'URL must use https://github.com/.\n' >&2; return 1; }
+    read -r -s -p 'GitHub PAT: ' token
+    printf '\n'
+    [[ -n "$token" ]] || { printf 'PAT cannot be empty.\n' >&2; return 1; }
+
+    install_controller_and_cache
+
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' RETURN
+    chmod 600 "$tmp"
+    printf '%s' "$token" > "$tmp"
+    unset token
+    kubectl_cmd -n "$RUNNER_NAMESPACE" create secret generic "$SECRET_NAME" \
+        --from-file=github_token="$tmp" --dry-run=client -o yaml | kubectl_cmd apply -f -
+    rm -f "$tmp"
+    trap - RETURN
+
+    install_runner "$url"
+    printf '\nRunner scale set installed as: %s\nUse: runs-on: %s\n' "$RUNNER_SCALE_SET_NAME" "$RUNNER_SCALE_SET_NAME"
+}
+
+install_or_update() {
+    local url
+    preflight
+
+    if ! helm status "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" >/dev/null 2>&1; then
+        printf 'No existing runner scale set found; starting initial configuration.\n'
+        configure
+        return
+    fi
+
+    url=$(helm get values "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" -o json | \
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("githubConfigUrl", ""))')
+    [[ "$url" == https://github.com/* ]] || {
+        printf 'Could not recover githubConfigUrl from the existing Helm release; run make configure.\n' >&2
+        return 1
+    }
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get secret "$SECRET_NAME" >/dev/null 2>&1 || {
+        printf 'Existing GitHub credential secret is missing; run make configure.\n' >&2
+        return 1
+    }
+
+    install_controller_and_cache
+    install_runner "$url"
+    printf '\nExisting runner installation updated without changing GitHub credentials.\n'
+}
+
+status() {
+    systemctl --user --no-pager status k3s-rootless.service || true
+    printf '\nKubernetes:\n'
+    kubectl_cmd get nodes
+    kubectl_cmd get pods -A
+    printf '\nNix cache:\n'
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get pvc nix-cache
+    kubectl_cmd -n "$RUNNER_NAMESPACE" get service nix-cache
+}
+
+logs() {
+    wait_for_k3s
+    kubectl_cmd -n "$CONTROLLER_NAMESPACE" logs -l app.kubernetes.io/name=gha-runner-scale-set-controller --all-containers --prefix --follow &
+    local p1=$!
+    kubectl_cmd -n "$RUNNER_NAMESPACE" logs -l actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME --all-containers --prefix --follow &
+    local p2=$!
+    trap 'kill "$p1" "$p2" 2>/dev/null || true' EXIT INT TERM
+    wait
+}
+
+kvm_test() {
+    wait_for_k3s
+    preflight_kvm
+    cat <<'YAML' | kubectl_cmd apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kvm-test
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: test
+      image: archlinux:latest
+      command: ["/bin/bash", "-ceu", "test -r /dev/kvm && test -w /dev/kvm && stat /dev/kvm"]
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: kvm
+          mountPath: /dev/kvm
+  volumes:
+    - name: kvm
+      hostPath:
+        path: /dev/kvm
+        type: CharDevice
+YAML
+    kubectl_cmd wait --for=jsonpath='{.status.phase}'=Succeeded pod/kvm-test --timeout=120s || {
+        kubectl_cmd describe pod/kvm-test
+        kubectl_cmd logs kvm-test || true
+        return 1
+    }
+    kubectl_cmd logs kvm-test
+    kubectl_cmd delete pod kvm-test --wait=false
+}
+
+uninstall() {
+    systemctl --user disable --now github-actions-sleep-inhibit.service 2>/dev/null || true
+    if [[ -r "$KUBECONFIG" ]]; then
+        helm uninstall "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" 2>/dev/null || true
+        kubectl_cmd delete -f "$NIX_CACHE_MANIFEST" --ignore-not-found 2>/dev/null || true
+        helm uninstall "$CONTROLLER_RELEASE" -n "$CONTROLLER_NAMESPACE" 2>/dev/null || true
+    fi
+    systemctl --user disable --now k3s-rootless.service 2>/dev/null || true
+}
+
+main() {
+    [[ $# -eq 1 ]] || { usage >&2; return 1; }
+    case "$1" in
+        install) install_or_update ;;
+        configure) configure ;;
+        wait) wait_for_k3s ;;
+        status) status ;;
+        logs) logs ;;
+        sleep-inhibit) sleep_inhibit ;;
+        kvm-test) kvm_test ;;
+        uninstall) uninstall ;;
+        -h|--help) usage ;;
+        *) printf 'Unknown command: %s\n' "$1" >&2; usage >&2; return 1 ;;
+    esac
+}
+
+main "$@"
+ <<<"$pod_states"; then
+            "${inhibitor[@]}" sleep 30
         else
             sleep 5
         fi
