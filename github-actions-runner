@@ -79,7 +79,7 @@ sleep_inhibit() {
             if ((${#active_pods[@]} > 0)); then
                 if (( inhibit_pid == 0 )); then
                     systemd-inhibit \
-                        --what=idle:sleep \
+                        --what=idle \
                         --who=github-actions-runner \
                         --why='GitHub Actions job is running' \
                         --mode=block \
