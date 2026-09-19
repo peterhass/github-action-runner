@@ -12,6 +12,7 @@ CONTROLLER_RELEASE="arc"
 CONTROLLER_NAMESPACE="arc-systems"
 RUNNER_RELEASE="github-actions-runner"
 RUNNER_NAMESPACE="arc-runners"
+RUNNER_SCALE_SET_NAME="self-hosted-k3s"
 SECRET_NAME="github-actions-runner"
 
 usage() {
@@ -24,6 +25,8 @@ Commands:
   wait        Wait for the rootless K3s API to become ready.
   status      Show K3s, ARC, Nix cache, and runner status.
   logs        Follow ARC controller and listener logs.
+  sleep-inhibit
+              Inhibit system sleep while an action runner pod is active.
   kvm-test    Verify a rootless pod can open /dev/kvm.
   uninstall   Remove ARC and stop the rootless K3s service.
 EOF
@@ -43,6 +46,63 @@ wait_for_k3s() {
     done
     printf 'Timed out waiting for rootless K3s. Check: journalctl --user -u k3s-rootless\n' >&2
     return 1
+}
+
+sleep_inhibit() {
+    local event name phase inhibit_pid=0
+    declare -A active_pods=()
+
+    cleanup_inhibitor() {
+        if (( inhibit_pid != 0 )); then
+            kill "$inhibit_pid" 2>/dev/null || true
+            wait "$inhibit_pid" 2>/dev/null || true
+            inhibit_pid=0
+        fi
+    }
+    trap cleanup_inhibitor EXIT INT TERM
+
+    while :; do
+        while read -r event name phase; do
+            case "$event" in
+                ADDED|MODIFIED)
+                    if [[ "$phase" == Pending || "$phase" == Running ]]; then
+                        active_pods["$name"]=1
+                    else
+                        unset 'active_pods[$name]'
+                    fi
+                    ;;
+                DELETED)
+                    unset 'active_pods[$name]'
+                    ;;
+            esac
+
+            if ((${#active_pods[@]} > 0)); then
+                if (( inhibit_pid == 0 )); then
+                    systemd-inhibit \
+                        --what=idle \
+                        --who=github-actions-runner \
+                        --why='GitHub Actions job is running' \
+                        --mode=block \
+                        sleep infinity &
+                    inhibit_pid=$!
+                fi
+            else
+                cleanup_inhibitor
+            fi
+        done < <(
+            kubectl_cmd -n "$RUNNER_NAMESPACE" get pods \
+                --watch \
+                --output-watch-events \
+                --no-headers \
+                -l "actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME" \
+                -o 'custom-columns=EVENT:.type,NAME:.object.metadata.name,PHASE:.object.status.phase' \
+                2>/dev/null
+        )
+
+        cleanup_inhibitor
+        active_pods=()
+        sleep 1
+    done
 }
 
 preflight_kvm() {
@@ -107,7 +167,7 @@ configure() {
     trap - RETURN
 
     install_runner "$url"
-    printf '\nRunner scale set installed as: self-hosted-k3s\nUse: runs-on: self-hosted-k3s\n'
+    printf '\nRunner scale set installed as: %s\nUse: runs-on: %s\n' "$RUNNER_SCALE_SET_NAME" "$RUNNER_SCALE_SET_NAME"
 }
 
 install_or_update() {
@@ -150,7 +210,7 @@ logs() {
     wait_for_k3s
     kubectl_cmd -n "$CONTROLLER_NAMESPACE" logs -l app.kubernetes.io/name=gha-runner-scale-set-controller --all-containers --prefix --follow &
     local p1=$!
-    kubectl_cmd -n "$RUNNER_NAMESPACE" logs -l actions.github.com/scale-set-name=self-hosted-k3s --all-containers --prefix --follow &
+    kubectl_cmd -n "$RUNNER_NAMESPACE" logs -l actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME --all-containers --prefix --follow &
     local p2=$!
     trap 'kill "$p1" "$p2" 2>/dev/null || true' EXIT INT TERM
     wait
@@ -192,6 +252,7 @@ YAML
 }
 
 uninstall() {
+    systemctl --user disable --now github-actions-sleep-inhibit.service 2>/dev/null || true
     if [[ -r "$KUBECONFIG" ]]; then
         helm uninstall "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" 2>/dev/null || true
         kubectl_cmd delete -f "$NIX_CACHE_MANIFEST" --ignore-not-found 2>/dev/null || true
@@ -208,6 +269,7 @@ main() {
         wait) wait_for_k3s ;;
         status) status ;;
         logs) logs ;;
+        sleep-inhibit) sleep_inhibit ;;
         kvm-test) kvm_test ;;
         uninstall) uninstall ;;
         -h|--help) usage ;;

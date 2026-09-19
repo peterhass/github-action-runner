@@ -1,0 +1,12 @@
+[Unit]
+Description=Inhibit sleep while GitHub Actions jobs run
+After=k3s-rootless.service
+Wants=k3s-rootless.service
+
+[Service]
+ExecStart=%h/.local/bin/github-actions-runner sleep-inhibit
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
