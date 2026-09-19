@@ -49,27 +49,59 @@ wait_for_k3s() {
 }
 
 sleep_inhibit() {
-    local pod_states
-    local kubectl_args=(
-        -n "$RUNNER_NAMESPACE"
-        get pods
-        -l "actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME"
-        -o 'jsonpath={range .items[*]}{.status.phase}{" "}{end}'
-    )
-    local inhibitor=(
-        systemd-inhibit
-        --what=idle:sleep
-        --who=github-actions-runner
-        --why='GitHub Actions job is running'
-        --mode=block
-    )
-    while :; do
-        pod_states=$(kubectl_cmd "${kubectl_args[@]}" 2>/dev/null || true)
-        if grep -Eq '(^| )(Pending|Running)( |$)' <<<"$pod_states"; then
-            "${inhibitor[@]}" sleep 30
-        else
-            sleep 5
+    local event name phase inhibit_pid=0
+    declare -A active_pods=()
+
+    cleanup_inhibitor() {
+        if (( inhibit_pid != 0 )); then
+            kill "$inhibit_pid" 2>/dev/null || true
+            wait "$inhibit_pid" 2>/dev/null || true
+            inhibit_pid=0
         fi
+    }
+    trap cleanup_inhibitor EXIT INT TERM
+
+    while :; do
+        while read -r event name phase; do
+            case "$event" in
+                ADDED|MODIFIED)
+                    if [[ "$phase" == Pending || "$phase" == Running ]]; then
+                        active_pods["$name"]=1
+                    else
+                        unset 'active_pods[$name]'
+                    fi
+                    ;;
+                DELETED)
+                    unset 'active_pods[$name]'
+                    ;;
+            esac
+
+            if ((${#active_pods[@]} > 0)); then
+                if (( inhibit_pid == 0 )); then
+                    systemd-inhibit \
+                        --what=idle:sleep \
+                        --who=github-actions-runner \
+                        --why='GitHub Actions job is running' \
+                        --mode=block \
+                        sleep infinity &
+                    inhibit_pid=$!
+                fi
+            else
+                cleanup_inhibitor
+            fi
+        done < <(
+            kubectl_cmd -n "$RUNNER_NAMESPACE" get pods \
+                --watch \
+                --output-watch-events \
+                --no-headers \
+                -l "actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME" \
+                -o 'custom-columns=EVENT:.type,NAME:.object.metadata.name,PHASE:.object.status.phase' \
+                2>/dev/null
+        )
+
+        cleanup_inhibitor
+        active_pods=()
+        sleep 1
     done
 }
 
