@@ -2,7 +2,7 @@
 
 A small, rootless K3s + GitHub Actions Runner Controller (ARC) setup for an AMD64 Linux workstation. ARC keeps **zero runners while idle** and starts up to six ephemeral runners when GitHub queues work. Every runner can access `/dev/kvm`.
 
-K3s itself runs as the current user through `systemd --user`; a companion user service holds a system sleep inhibitor only while an ARC runner pod is pending or running. The machine can sleep normally when the runner scale set is idle. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
+K3s itself runs as the current user through `systemd --user`; a companion user service holds an idle inhibitor only while an ARC runner pod is pending or running. This prevents automatic idle sleep during jobs while allowing normal sleep when the runner scale set is idle. Because the watcher is an unprivileged lingering user service, explicit suspend/lid inhibition requires an additional polkit rule; see the note below. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
 
 ## Prerequisites
 
