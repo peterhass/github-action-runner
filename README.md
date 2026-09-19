@@ -2,7 +2,7 @@
 
 A small, rootless K3s + GitHub Actions Runner Controller (ARC) setup for an AMD64 Linux workstation. ARC keeps **zero runners while idle** and starts up to six ephemeral runners when GitHub queues work. Every runner can access `/dev/kvm`.
 
-K3s itself runs as the current user through `systemd --user`; root inside runner pods maps into the rootless K3s user namespace, not host root. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
+K3s itself runs as the current user through `systemd --user`; a companion user service holds a system sleep inhibitor only while an ARC runner pod is pending or running. The machine can sleep normally when the runner scale set is idle. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ cd github-action-runner
 make install
 ```
 
-`make install` installs and starts the rootless K3s user service, waits for Kubernetes, installs the official ARC controller Helm chart, deploys the persistent Nix cache, and prompts for:
+`make install` installs and starts the rootless K3s and sleep-inhibition user services, waits for Kubernetes, installs the official ARC controller Helm chart, deploys the persistent Nix cache, and prompts for:
 
 1. the GitHub repository or organization URL;
 2. a GitHub PAT used by ARC.
@@ -59,7 +59,7 @@ minRunners: 0
 maxRunners: 6
 ```
 
-With no queued work, only K3s, the ARC controller, its listener, and the small Nix cache server remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs.
+With no queued work, only K3s, the ARC controller, its listener, and the small Nix cache server remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs. The sleep-inhibition service watches those runner pods, so it releases its lock as soon as the runner scale set returns to zero.
 
 Use the scale-set name in workflows:
 
@@ -108,7 +108,7 @@ There is deliberately **no per-runner memory limit**. Memory-heavy Nix builds ca
 make status      Show K3s, Kubernetes, and Nix cache status
 make logs        Follow ARC controller/listener logs
 make restart     Restart rootless K3s
-make disable     Stop and disable rootless K3s
+make disable     Stop and disable rootless K3s and sleep inhibition
 make configure   Re-run ARC and Nix cache configuration
 make kvm-test    Verify /dev/kvm from a rootless pod
 make uninstall   Remove ARC, the Nix cache, and local configuration
@@ -125,6 +125,7 @@ journalctl --user -u k3s-rootless -f
 
 - Helper command: `~/.local/bin/github-actions-runner`
 - Rootless K3s unit: `~/.config/systemd/user/k3s-rootless.service`
+- Sleep-inhibition unit: `~/.config/systemd/user/github-actions-sleep-inhibit.service`
 - Installed ARC/cache configuration: `~/.local/share/github-actions-runner/`
 - Kubeconfig: `~/.kube/k3s.yaml`
 
