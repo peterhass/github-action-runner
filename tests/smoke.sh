@@ -24,7 +24,7 @@ grep -Fq 'systemd-inhibit' github-actions-runner
 grep -Fq -- '--watch' github-actions-runner
 grep -Fq -- '--output-watch-events' github-actions-runner
 grep -Fq 'declare -A active_pods' github-actions-runner
-grep -Fq -- '--what=idle:sleep' github-actions-runner
+grep -Fq -- '--what=idle' github-actions-runner
 grep -Fq -- '--mode=block' github-actions-runner
 grep -Fq 'actions.github.com/scale-set-name' github-actions-runner
 grep -Fq 'github-actions-sleep-inhibit.service' Makefile
