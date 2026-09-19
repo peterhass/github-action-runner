@@ -12,6 +12,7 @@ CONTROLLER_RELEASE="arc"
 CONTROLLER_NAMESPACE="arc-systems"
 RUNNER_RELEASE="github-actions-runner"
 RUNNER_NAMESPACE="arc-runners"
+RUNNER_SCALE_SET_NAME="self-hosted-k3s"
 SECRET_NAME="github-actions-runner"
 
 usage() {
@@ -24,6 +25,8 @@ Commands:
   wait        Wait for the rootless K3s API to become ready.
   status      Show K3s, ARC, Nix cache, and runner status.
   logs        Follow ARC controller and listener logs.
+  sleep-inhibit
+              Inhibit system sleep while an action runner pod is active.
   kvm-test    Verify a rootless pod can open /dev/kvm.
   uninstall   Remove ARC and stop the rootless K3s service.
 EOF
@@ -43,6 +46,18 @@ wait_for_k3s() {
     done
     printf 'Timed out waiting for rootless K3s. Check: journalctl --user -u k3s-rootless\n' >&2
     return 1
+}
+
+sleep_inhibit() {
+    local pod_states
+    while :; do
+        pod_states=$(kubectl_cmd -n "$RUNNER_NAMESPACE" get pods             -l "actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME"             -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null || true)
+        if grep -Eq '^(Pending|Running)$' <<<"$pod_states"; then
+            systemd-inhibit                 --what=idle:sleep                 --who=github-actions-runner                 --why='GitHub Actions job is running'                 --mode=block                 sleep 30
+        else
+            sleep 5
+        fi
+    done
 }
 
 preflight_kvm() {
@@ -107,7 +122,7 @@ configure() {
     trap - RETURN
 
     install_runner "$url"
-    printf '\nRunner scale set installed as: self-hosted-k3s\nUse: runs-on: self-hosted-k3s\n'
+    printf '\nRunner scale set installed as: %s\nUse: runs-on: %s\n' "$RUNNER_SCALE_SET_NAME" "$RUNNER_SCALE_SET_NAME"
 }
 
 install_or_update() {
@@ -150,7 +165,7 @@ logs() {
     wait_for_k3s
     kubectl_cmd -n "$CONTROLLER_NAMESPACE" logs -l app.kubernetes.io/name=gha-runner-scale-set-controller --all-containers --prefix --follow &
     local p1=$!
-    kubectl_cmd -n "$RUNNER_NAMESPACE" logs -l actions.github.com/scale-set-name=self-hosted-k3s --all-containers --prefix --follow &
+    kubectl_cmd -n "$RUNNER_NAMESPACE" logs -l actions.github.com/scale-set-name=$RUNNER_SCALE_SET_NAME --all-containers --prefix --follow &
     local p2=$!
     trap 'kill "$p1" "$p2" 2>/dev/null || true' EXIT INT TERM
     wait
@@ -192,6 +207,7 @@ YAML
 }
 
 uninstall() {
+    systemctl --user disable --now github-actions-sleep-inhibit.service 2>/dev/null || true
     if [[ -r "$KUBECONFIG" ]]; then
         helm uninstall "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" 2>/dev/null || true
         kubectl_cmd delete -f "$NIX_CACHE_MANIFEST" --ignore-not-found 2>/dev/null || true
@@ -208,6 +224,7 @@ main() {
         wait) wait_for_k3s ;;
         status) status ;;
         logs) logs ;;
+        sleep-inhibit) sleep_inhibit ;;
         kvm-test) kvm_test ;;
         uninstall) uninstall ;;
         -h|--help) usage ;;
