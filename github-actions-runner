@@ -27,6 +27,8 @@ Commands:
   logs        Follow ARC controller and listener logs.
   sleep-inhibit
               Inhibit system sleep while an action runner pod is active.
+  resume-watch
+              Restart rootless K3s after system resume.
   kvm-test    Verify a rootless pod can open /dev/kvm.
   uninstall   Remove ARC and stop the rootless K3s service.
 EOF
@@ -103,6 +105,22 @@ sleep_inhibit() {
         active_pods=()
         sleep 1
     done
+}
+
+resume_watch() {
+    local line
+
+    while IFS= read -r line; do
+        if [[ "$line" == *'PrepareForSleep (false,'* ]]; then
+            printf 'System resumed; restarting rootless K3s in 5 seconds.\n' >&2
+            sleep 5
+            systemctl --user restart k3s-rootless.service
+        fi
+    done < <(
+        gdbus monitor --system \
+            --dest org.freedesktop.login1 \
+            --object-path /org/freedesktop/login1
+    )
 }
 
 preflight_kvm() {
@@ -252,6 +270,7 @@ YAML
 }
 
 uninstall() {
+    systemctl --user disable --now github-actions-resume.service 2>/dev/null || true
     systemctl --user disable --now github-actions-sleep-inhibit.service 2>/dev/null || true
     if [[ -r "$KUBECONFIG" ]]; then
         helm uninstall "$RUNNER_RELEASE" -n "$RUNNER_NAMESPACE" 2>/dev/null || true
@@ -270,6 +289,7 @@ main() {
         status) status ;;
         logs) logs ;;
         sleep-inhibit) sleep_inhibit ;;
+        resume-watch) resume_watch ;;
         kvm-test) kvm_test ;;
         uninstall) uninstall ;;
         -h|--help) usage ;;
