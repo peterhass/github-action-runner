@@ -2,7 +2,7 @@
 
 A small, rootless K3s + GitHub Actions Runner Controller (ARC) setup for an AMD64 Linux workstation. ARC keeps **zero runners while idle** and starts up to six ephemeral runners when GitHub queues work. Every runner can access `/dev/kvm`.
 
-K3s itself runs as the current user through `systemd --user`; a companion user service holds an idle inhibitor only while an ARC runner pod is pending or running. This prevents automatic idle sleep during jobs while allowing normal sleep when the runner scale set is idle. Because the watcher is an unprivileged lingering user service, explicit suspend/lid inhibition requires an additional polkit rule; see the note below. A second user service listens for logind's resume signal and restarts rootless K3s after a short delay, recreating ARC's GitHub listener with a fresh network connection. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
+K3s itself runs as the current user through `systemd --user`; a companion user service holds an idle inhibitor only while an ARC runner pod is pending or running. This prevents automatic idle sleep during jobs while allowing normal sleep when the runner scale set is idle. Because the watcher is an unprivileged lingering user service, explicit suspend/lid inhibition requires an additional polkit rule; see the note below. A second user service listens for logind's resume signal, waits until GitHub is reachable, and then restarts rootless K3s to recreate ARC's listener with a fresh network connection. The K3s service has low CPU/I/O weight but no CPU quota, so CI can use all otherwise-idle CPU and yields under contention.
 
 ## Prerequisites
 
@@ -59,7 +59,7 @@ minRunners: 0
 maxRunners: 6
 ```
 
-With no queued work, only K3s, the ARC controller, its listener, and the small Nix cache server remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs. The sleep-inhibition service watches those runner pods, so it releases its lock as soon as the runner scale set returns to zero. The resume-recovery service restarts rootless K3s five seconds after each system resume, causing ARC to create a fresh listener instead of retaining a stale pre-suspend connection.
+With no queued work, only K3s, the ARC controller, its listener, and the small Nix cache server remain. Runner pods are ephemeral and scale from zero to six according to assigned jobs. The sleep-inhibition service watches those runner pods, so it releases its lock as soon as the runner scale set returns to zero. The resume-recovery service waits for GitHub to be reachable after each system resume, then restarts rootless K3s so ARC creates a fresh listener instead of retaining a stale pre-suspend connection.
 
 Use the scale-set name in workflows:
 
