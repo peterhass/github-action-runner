@@ -7,6 +7,7 @@ SYSTEMD_DIR := $(HOME)/.config/systemd/user
 install:
 	command -v k3s >/dev/null || { echo 'k3s is required; see README.md' >&2; exit 1; }
 	command -v helm >/dev/null || { echo 'helm is required; see README.md' >&2; exit 1; }
+	command -v curl >/dev/null || { echo 'curl is required; see README.md' >&2; exit 1; }
 	command -v python3 >/dev/null || { echo 'python3 is required; see README.md' >&2; exit 1; }
 	command -v systemd-inhibit >/dev/null || { echo 'systemd-inhibit is required; see README.md' >&2; exit 1; }
 	command -v gdbus >/dev/null || { echo 'gdbus is required; see README.md' >&2; exit 1; }
