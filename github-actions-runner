@@ -50,6 +50,12 @@ wait_for_k3s() {
     return 1
 }
 
+wait_for_github() {
+    until curl --fail --silent --show-error --max-time 5 https://api.github.com/zen >/dev/null 2>&1; do
+        sleep 2
+    done
+}
+
 sleep_inhibit() {
     local event name phase inhibit_pid=0
     declare -A active_pods=()
@@ -112,8 +118,8 @@ resume_watch() {
 
     while IFS= read -r line; do
         if [[ "$line" == *'PrepareForSleep (false,'* ]]; then
-            printf 'System resumed; restarting rootless K3s in 5 seconds.\n' >&2
-            sleep 5
+            printf 'System resumed; waiting for GitHub before restarting rootless K3s.\n' >&2
+            wait_for_github
             systemctl --user restart k3s-rootless.service
         fi
     done < <(
