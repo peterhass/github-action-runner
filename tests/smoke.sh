@@ -23,6 +23,8 @@ grep -Fq "nix copy --all --to 'file:///nix-cache?compression=zstd&compression-le
 grep -Fq 'systemd-inhibit' github-actions-runner
 grep -Fq 'gdbus monitor --system' github-actions-runner
 grep -Fq 'PrepareForSleep (false,' github-actions-runner
+grep -Fq 'wait_for_github' github-actions-runner
+grep -Fq 'https://api.github.com/zen' github-actions-runner
 grep -Fq 'restart k3s-rootless.service' github-actions-runner
 grep -Fq -- '--watch' github-actions-runner
 grep -Fq -- '--output-watch-events' github-actions-runner
