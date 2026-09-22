@@ -1,0 +1,12 @@
+[Unit]
+Description=Restart rootless K3s after system resume
+After=k3s-rootless.service
+Wants=k3s-rootless.service
+
+[Service]
+ExecStart=%h/.local/bin/github-actions-runner resume-watch
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
